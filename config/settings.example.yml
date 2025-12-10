@@ -1,13 +1,14 @@
-# db:
-#   path: ./data/rates.db
+db:
+  path: ./data/rates.db
 
-# monitoring:
-#   interval_seconds: 300
+monitoring:
+  interval_seconds: 300
 
-# alerts:
-#   enabled: false
-#   threshold: 0.0
+alerts:
+  enabled: false
+  threshold: 0.0
 
-# slack:
-#   webhook_url: https://hooks.slack.com/services/XXXX/XXXX/XXXX
-#   channel: rate-alerts
+slack:
+  enabled: false
+  webhook_url: ""  # or ${SLACK_WEBHOOK_URL}
+  channel: "#alerts"
