@@ -1,3 +1,4 @@
-target_id,timestamp,value
-sample_target,2023-01-01T00:00:00Z,123.45
-sample_target,2023-01-01T01:00:00Z,234.56
+timestamp,target_id,value
+2025-01-01T09:00:00+09:00,usd_jpy,150.25
+2025-01-01T10:00:00+09:00,usd_jpy,150.40
+2025-01-02T09:00:00+09:00,usd_jpy,151.10
