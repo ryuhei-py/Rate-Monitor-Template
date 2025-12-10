@@ -1,0 +1,3 @@
+target_id,timestamp,value
+sample_target,2023-01-01T00:00:00Z,123.45
+sample_target,2023-01-01T01:00:00Z,234.56

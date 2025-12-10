@@ -1,0 +1,6 @@
+# db:
+#   path: ./data/rates.db
+# notifier:
+#   slack_webhook_url: https://hooks.slack.com/services/XXXX/XXXX/XXXX
+# scheduler:
+#   interval_seconds: 300
