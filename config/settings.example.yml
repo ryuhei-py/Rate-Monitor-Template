@@ -1,6 +1,13 @@
 # db:
 #   path: ./data/rates.db
-# notifier:
-#   slack_webhook_url: https://hooks.slack.com/services/XXXX/XXXX/XXXX
-# scheduler:
+
+# monitoring:
 #   interval_seconds: 300
+
+# alerts:
+#   enabled: false
+#   threshold: 0.0
+
+# slack:
+#   webhook_url: https://hooks.slack.com/services/XXXX/XXXX/XXXX
+#   channel: rate-alerts

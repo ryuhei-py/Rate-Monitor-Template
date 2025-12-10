@@ -1,4 +1,5 @@
 # targets:
 #   - id: sample_target
+#     name: Sample Target
 #     url: https://example.com/rates
-#     parser: default
+#     selector: div.price
