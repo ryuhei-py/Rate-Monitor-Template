@@ -1,0 +1,4 @@
+# targets:
+#   - id: sample_target
+#     url: https://example.com/rates
+#     parser: default

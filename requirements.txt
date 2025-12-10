@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+PyYAML
+python-dotenv
+pandas
+SQLAlchemy
+pytest
+ruff

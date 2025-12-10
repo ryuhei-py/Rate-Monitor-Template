@@ -1,0 +1,24 @@
+[project]
+name = "rate-monitor-template"
+version = "0.1.0"
+description = "Template scaffolding for a rate monitor project."
+authors = [{ name = "Your Name" }]
+requires-python = ">=3.11"
+dependencies = [
+  "requests",
+  "beautifulsoup4",
+  "PyYAML",
+  "python-dotenv",
+  "pandas",
+  "SQLAlchemy"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff"
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
