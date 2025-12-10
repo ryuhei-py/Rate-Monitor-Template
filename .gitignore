@@ -215,3 +215,6 @@ __pycache__/
 .idea/
 *.sqlite3
 data/*.db
+
+# Developer note
+dev_note/
