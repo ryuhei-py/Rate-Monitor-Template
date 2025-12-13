@@ -1,6 +1,6 @@
 """Tests for database layer."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlite3
@@ -26,7 +26,7 @@ def test_insert_and_get_history_round_trip(tmp_path: Path) -> None:
     db = RateDatabase(str(db_path))
     db.init_schema()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     recent = now - timedelta(hours=1)
     old = now - timedelta(days=5)
 

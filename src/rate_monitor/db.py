@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta,timezone
 from pathlib import Path
 from typing import List, Tuple
 
@@ -51,7 +51,7 @@ class RateDatabase:
 
     def get_history(self, target_id: str, days: int) -> List[Tuple[datetime, float]]:
         """Fetch rate history for a target within the requested window."""
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.execute(
                 "SELECT ts, value FROM rates WHERE target_id = ? AND ts >= ? ORDER BY ts ASC",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
@@ -52,7 +52,7 @@ def main(argv: List[str] | None = None) -> None:
         stats_list: List[RateStats] = []
 
         for target in targets:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             html = fetcher.get(target.url)
             parser = RatePageParser(target.selector)
             rate = parser.parse(html)
