@@ -1,12 +1,10 @@
 # Rate Monitor Template
-A configuration-driven Python template that monitors numeric rates/prices from web pages, stores time-series observations in SQLite, analyzes changes using moving averages, and exports run artifacts—designed for scheduled, real-world operation.
 
----
-
-## Badges
 ![CI](https://github.com/ryuhei-py/Rate-Monitor-Template/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
+
+A configuration-driven Python template that monitors numeric rates/prices from web pages, stores time-series observations in SQLite, analyzes changes using moving averages, and exports run artifacts—designed for scheduled, real-world operation.
 
 ---
 
