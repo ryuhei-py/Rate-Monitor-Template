@@ -1,381 +1,217 @@
-# Security & Legal Considerations
-This section provides security, ethical, and legal guidance while preserving the original content order.
+# SECURITY_AND_LEGAL
 
-This document provides **security, ethical, and legal guidance** for using and adapting the **Rate Monitor Template**.
+## Purpose
+This document defines the security posture, responsible-use expectations, and legal/terms considerations for this repository. It is written to be directly usable as a GitHub-public document and to make clear, without ambiguity, how to operate this template safely and compliantly.
 
-The template itself is neutral: it does not target any specific website or API.  
-However, once you connect it to real services, you become responsible for:
-
-- complying with **website terms of service**,
-- respecting **robots.txt** and technical constraints,
-- protecting **secrets and credentials**,
-- handling **data** in a secure and compliant way.
-
-This document is not legal advice. For production or commercial use, always consult a qualified legal professional for your jurisdiction and your specific use case.
+This repository is a **config-driven monitoring template** that fetches web pages, extracts a numeric “rate” via CSS selectors, stores time-series points locally in SQLite, computes simple baseline metrics, and emits alert signals and exports.
 
 ---
 
-## 1. Scope and responsibilities
-This section clarifies what the template does and your duties.
+## Scope
 
-### 1.1 What this template does
-The Rate Monitor Template:
+### In Scope (What the Template Supports)
+- **HTTP fetching** of configured target URLs (GET requests)
+- **HTML parsing** using a CSS selector to extract a single numeric value per target
+- **Local persistence** to SQLite (time-series points per target)
+- **Basic analysis** using moving-average baselines and percent deltas
+- **Notifications**
+  - Standard output notifications (implemented and used by default)
+  - Slack incoming webhook notifier (implemented)
+- **Exports** of run artifacts (CSV / JSON)
+- **External scheduling** (cron / Windows Task Scheduler) for periodic execution
 
-- issues HTTP requests to configured URLs,
-- parses numeric values from HTML,
-- stores them in a local SQLite database,
-- computes simple statistics,
-- optionally sends alerts (e.g., Slack),
-- exports data to CSV/JSON.
-
-By default, it does **not**:
-
-- bypass access controls (no authentication brute-forcing, no CAPTCHAs),
-- scrape specific sites by hard-coded design,
-- automate account logins or session hijacking,
-- perform denial-of-service or aggressive crawling.
-
-### 1.2 Your responsibility
-When you configure and deploy this template, you are responsible for:
-
-- **What you monitor** (which websites, APIs, endpoints),
-- **How frequently** you access them,
-- **How you use the collected data**.
-
-You must ensure that your usage:
-
-- complies with each site’s **Terms of Service (ToS)**,
-- respects technical and legal boundaries,
-- does not violate laws (e.g., computer misuse, data protection),
-- aligns with any contract you have with a client (e.g., Upwork jobs).
+### Out of Scope (Not Provided by This Template)
+- Legal advice, jurisdiction-specific compliance determinations, or contractual interpretation
+- Automatic enforcement of **Terms of Service** (ToS) constraints for target sites
+- Automatic `robots.txt` checks/enforcement
+- CAPTCHA bypassing, login automation for restricted content, paywall circumvention, or evasion of blocks
+- High-volume crawling behavior (this is a monitor, not a crawler)
+- Advanced rate-limit negotiation (e.g., robust 429 handling) unless you implement it
+- Enterprise-grade secrets management (beyond standard patterns such as environment variables)
 
 ---
 
-## 2. Website Terms of Service & robots.txt
-This section explains ToS and robots.txt considerations.
+## Responsible Use Requirements
 
-### 2.1 Terms of Service (ToS)
-Most websites and APIs have Terms of Service that:
+### Operator Responsibilities
+You are responsible for how you configure targets, scheduling frequency, data retention, and distribution of any extracted information. This template is intentionally neutral and does not “decide” whether a particular target may be accessed.
 
-- define permissible usage,
-- restrict automated access and scraping,
-- describe rate limits and fair use,
-- specify intellectual property rights.
+Minimum expected practices:
+- **Review each target site’s ToS** and automation policy before monitoring.
+- Prefer **official APIs** where available and permitted for the intended use.
+- Use **conservative request rates** and scheduling intervals appropriate to the site’s constraints.
+- Implement **data minimization**: monitor only what you need for the monitoring purpose.
+- Stop monitoring immediately if the site disallows automated access or requests cessation.
 
-Before monitoring a website:
-
-1. Read its **Terms of Service**.
-2. Confirm whether:
-   - automated access is allowed,
-   - scraping / data extraction is allowed,
-   - attribution or licensing requirements exist,
-   - special conditions apply (e.g., non-commercial use only).
-3. If in doubt, seek **explicit permission** or consult a lawyer.
-
-Violating ToS can lead to:
-
-- account bans,
-- IP blocking,
-- contractual disputes,
-- potential legal claims (depending on jurisdiction).
-
-### 2.2 robots.txt
-Many sites publish a `robots.txt` file (e.g. `https://example.com/robots.txt`) that:
-
-- indicates which paths robots (crawlers) should avoid,
-- may define crawl-delay or similar guidance.
-
-Although `robots.txt` is not itself a law, it is a widely recognized convention and may be relevant for:
-
-- ethical scraping behavior,
-- platform policies,
-- legal analysis in some contexts.
-
-Good practice:
-
-- Check `robots.txt` for each target domain.
-- Avoid scraping disallowed paths.
-- Respect any crawl-delay or frequency guidance if provided.
+### Prohibited Uses
+Do not use this template to:
+- Circumvent access controls (CAPTCHA, paywalls, authentication gates, IP blocks)
+- Engage in deceptive or evasive behavior intended to violate a site’s rules
+- Collect or process personal data without a lawful basis and appropriate safeguards
+- Perform high-volume crawling or denial-of-service behavior
+- Redistribute scraped content in violation of ToS, copyright, or other applicable restrictions
 
 ---
 
-## 3. Rate limiting and load management
-This section explains how to avoid overloading targets.
+## Legal and Terms Considerations
 
-Even when ToS allows automated access, you must avoid **overloading** target servers.
+### Terms of Service (ToS)
+Many websites impose restrictions on automated access, data extraction, caching, reuse, and redistribution. “Publicly visible” does not automatically mean “permitted to automate,” and ToS constraints can apply even to simple numeric values depending on context.
 
-### 3.1 Frequency of requests
-- Keep request frequency proportional to needs:
-  - E.g., **hourly** checks for daily rate monitoring are usually sufficient.
-- Avoid making:
-  - multiple requests per second,
-  - large bursts of traffic,
-  - crawls over many pages from a single small site.
+This repository does not automatically validate ToS compliance. Before monitoring a target, confirm:
+- Whether automated requests are permitted for your purpose
+- Whether the data may be stored and reused
+- Whether redistribution/publication is restricted
+- Whether there are explicit rate limits, access windows, or attribution requirements
 
-### 3.2 Randomized delays (if needed)
-To reduce the risk of appearing abusive:
+### robots.txt
+`robots.txt` is commonly used to indicate crawl policies. This template does not automatically read or enforce robots rules. If your compliance policy requires robots adherence, implement it or restrict target selection accordingly.
 
-- Introduce small random delays between requests.
-- Stagger checks for many targets.
+### Intellectual Property and Database Rights
+Even when monitoring “facts” (e.g., numeric rates), the surrounding presentation, compilation, or dataset may be protected by copyright or database-right regimes, and usage can also be restricted by contract.
 
-### 3.3 Backoff behavior
-Consider implementing:
+This template is intended for **small-scale numeric monitoring**. Expanding the extraction scope to include larger text blocks, images, or product catalogs materially increases legal risk and should be reviewed carefully.
 
-- Exponential backoff or cooldown when:
-  - HTTP 429 (Too Many Requests) is received,
-  - repeated network errors occur,
-  - server response times increase significantly.
-
-The current template focuses on **simple retries** for robustness.  
-For production use, you may enhance it with:
-
-- dynamic rate limiting,
-- global concurrency controls,
-- backoff strategies tuned per target.
+### Trademarks and Representation
+Do not imply affiliation with, endorsement by, or official status relative to any monitored site. Avoid naming or branding that could cause confusion.
 
 ---
 
-## 4. Authentication, sessions, and private data
-This section explains handling of credentials and sensitive areas.
+## Data Handling and Privacy
 
-### 4.1 Avoid credentials in code or repo
-Never hard-code:
+### Data Stored by Default
+The template stores and exports a minimal monitoring record:
+- `target_id` — logical identifier for the monitored target
+- `ts` — ISO-8601 timestamp string (generated from UTC time but stored as a **naive** timestamp string)
+- `value` — numeric value (float)
 
-- usernames,
-- passwords,
-- API keys,
-- session cookies,
-- access tokens
+### Exports
+The template produces run artifacts:
+- `rates.csv` — a snapshot containing the **current run’s** `(timestamp, target_id, value)` rows
+- `latest_stats.json` — a snapshot containing computed stats for the current run (moving averages and percent changes)
 
-directly into code or into version-controlled config files.
+### Personal Data
+The default workflow does not require personal data. If you configure targets that include personal data, you must apply appropriate privacy controls, including:
+- lawful basis and transparency (where required)
+- minimization (collect only what is necessary)
+- retention limits and deletion procedures
+- access control and auditability
+- secure storage and secure transfer when sharing artifacts
 
-Instead:
-
-- Store secrets in `.env` (not committed) or environment variables.
-- Use a secrets manager (e.g., AWS Secrets Manager, GitHub Actions secrets, etc.) in more advanced setups.
-
-### 4.2 Logged-in / private areas
-If you monitor data behind a login:
-
-- Ensure:
-  - you have the **right** to access and collect that data,
-  - you do not exceed permitted usage,
-  - you comply with any relevant user agreements.
-- Implement authentication **securely**:
-  - Do not embed credentials directly in `settings.yml`.
-  - Use secure storage and minimal privilege.
-
-### 4.3 Sensitive data types
-If you adapt this template to monitor data that could be considered sensitive (e.g., personal data, financial information, health-related metrics):
-
-- Be aware of regulatory frameworks:
-  - GDPR (EU), CCPA/CPRA (California), and other local data protection laws.
-- Take extra steps:
-  - Pseudonymization / anonymization where possible.
-  - Encryption at rest and in transit where appropriate.
-  - Minimal data retention (only store what you actually need).
+### Retention and Minimization
+Recommended baseline practices:
+- Define a retention policy for SQLite history (e.g., delete records older than N days).
+- Treat exported CSV/JSON files as potentially sensitive.
+- Avoid committing output artifacts or databases containing real monitored values to public repositories.
 
 ---
 
-## 5. Data storage, retention, and backups
-This section covers storage considerations.
+## Security Posture (Implementation Summary)
 
-### 5.1 SQLite database
-The default SQLite database file:
+### Network Behavior
+- Requests are issued via the `requests` library using HTTP GET.
+- A static User-Agent header is used by default; adjust as needed to meet target requirements.
+- Retries occur for transient failures (network exceptions and HTTP 5xx).
+- There is no built-in adaptive throttling or robust 429 backoff by default.
 
-- contains time-series of `target_id`, `timestamp`, `value`,
-- may be considered **business data** or potentially sensitive depending on usage.
+Operational implication:
+- Choose conservative schedules.
+- If monitoring many targets or encountering rate limiting, implement explicit rate limiting/backoff logic.
 
-Security considerations:
+### Local Storage Security
+- SQLite is used for persistence. File security depends on OS-level permissions.
+- On multi-user systems, restrict:
+  - DB file permissions (read/write access)
+  - output directory permissions
+  - logs (if you add logging)
 
-- Ensure the `data/` directory is not world-readable in a multi-user system.
-- Limit access to the machine and directory to authorized users only.
-
-### 5.2 Backups
-When backing up the database:
-
-- Store backups in secure locations.
-- Apply proper access control (e.g., limited IAM policies, encrypted storage).
-- Consider retention policies:
-  - How long do you need to keep data?
-  - When should old backups be deleted?
-
-### 5.3 Data minimization
-Avoid collecting or keeping unnecessary data:
-
-- If shorter history is sufficient, periodically purge older entries.
-- If certain targets are no longer needed, stop monitoring them and consider anonymizing or deleting their historical data.
+### Notification Security (Slack Webhooks)
+- Slack notifications use incoming webhooks (HTTP POST).
+- Webhook URLs provide write access to a Slack destination and must be treated as secrets.
+- Do not embed webhook URLs in public config files or commit them to Git.
 
 ---
 
-## 6. Exported files (CSV / JSON)
-This section explains handling of exported artifacts.
+## Secrets Management
 
-The template can export data to:
+### Repository Conventions
+- `.env.example` is included to demonstrate typical environment variable conventions.
+- The current runtime behavior may not automatically load `.env` unless you add explicit startup loading.
 
-- `sample_output/rates.csv`
-- `sample_output/latest_stats.json`
-- or other configured paths.
-
-Treat these exports with the same care as the database:
-
-- Do not commit real data to public GitHub repositories.
-- Ensure exported files are stored in directories with appropriate permissions.
-- If you share data with clients, clarify:
-  - what the data represents,
-  - how it was collected,
-  - whether any licensing constraints apply.
+### Best Practices
+- Store secrets in:
+  - OS environment variables
+  - CI/CD secret stores
+  - managed secret managers (when applicable)
+- Never commit secrets to version control.
+- Rotate credentials immediately if exposure is suspected.
 
 ---
 
-## 7. Legal considerations by use case
-This section provides high-level legal context.
+## Operational Safety Controls (Recommended)
 
-> This section is only a high-level orientation.  
-> Actual legal risk depends on your jurisdiction, the target site, contract terms, and purpose of use.
+### Scheduling and Rate Control
+This template is designed for external scheduling. Recommended controls:
+- Use conservative intervals aligned with target policies.
+- If monitoring multiple targets, consider adding:
+  - per-target delays
+  - concurrency limits
+  - jitter to avoid bursty request patterns
+  - explicit handling for HTTP 429 with exponential backoff
 
-### 7.1 Public FX / market data
-- Many FX or cryptocurrency rate pages are:
-  - accessible without login,
-  - widely mirrored or re-published.
-- However:
-  - Vendors may claim IP rights over their specific price feeds.
-  - ToS may restrict automated collection or re-distribution.
+### Failure Handling and Isolation
+The current CLI is a single-run batch. For production-grade resilience:
+- isolate per-target failures (continue processing other targets)
+- emit structured logs and a run summary
+- distinguish partial vs total failures via exit codes
 
-Mitigation:
-
-- Prefer official APIs when available.
-- Check ToS for permitted usage and redistribution.
-- Avoid republishing full data sets from a vendor without permission.
-
-### 7.2 Product prices (e-commerce sites)
-- E-commerce platforms often restrict scraping in ToS.
-- They may protect:
-  - product catalogs,
-  - pricing strategies,
-  - reviews / user-generated content.
-
-Mitigation:
-
-- Read and follow ToS; some platforms explicitly forbid scraping.
-- Consider using official APIs or affiliate feeds where provided.
-- Avoid high-frequency or large-scale scraping that resembles data exfiltration.
-
-### 7.3 Client-specific projects (e.g., Upwork)
-When used in freelancing / client work:
-
-- Clarify in the contract:
-  - which sites or systems can be monitored,
-  - whether the client has rights/permissions to access the data,
-  - who is responsible for legal compliance.
-- Provide clients with:
-  - configuration files,
-  - documentation on how the tool operates,
-  - clear disclaimers that **they** must use it within their legal boundaries.
+### Data Hygiene
+- Periodically vacuum/maintain SQLite if long-running
+- Rotate or archive exports to avoid uncontrolled growth
+- Consider “history export” as a separate operation if needed (rather than exporting full DB history every run)
 
 ---
 
-## 8. Handling bot detection and CAPTCHAs
-This section explains limitations regarding bot defenses.
+## Configuration and Behavior Notes (Documentation Alignment)
+This repository is a template. When using it as a reusable baseline, keep the following alignment points in mind:
 
-The template is **not** intended to bypass:
+- Some example configuration keys may represent intended extensions rather than fully enforced runtime behavior.
+- Scheduling settings may be documented conceptually even though execution frequency is controlled externally.
+- Analysis windows may be described in “days,” while the implementation uses fixed, observation-based windows unless extended.
+- Environment variable usage may be recommended even if `.env` auto-loading is not wired by default.
 
-- CAPTCHAs,
-- bot detection systems,
-- login restrictions,
-- anti-scraping measures.
-
-Attempting to defeat such protections may:
-
-- violate ToS,
-- violate computer misuse laws in some jurisdictions,
-- damage your or your client’s reputation.
-
-If you encounter CAPTCHAs or explicit anti-bot mechanisms:
-
-- Consider:
-  - obtaining official API access,
-  - partnering with the data provider,
-  - seeking explicit permission.
-- Do **not** implement credential stuffing, automated CAPTCHA solving, or other evasive techniques in this template.
+If strict “docs match code” consistency is required, update either:
+- the implementation to match the documented settings, or
+- the documentation to match the current runtime behavior.
 
 ---
 
-## 9. Client communication & transparency
-This section highlights communication best practices.
+## Safe Customization Guidelines
 
-When presenting this template to clients (e.g., in an Upwork portfolio):
+### Adding Authentication
+- Do not store credentials in-repo.
+- Prefer short-lived tokens where possible.
+- Implement audit/logging controls if accessing protected resources.
 
-- Emphasize that:
-  - the tool is **config-driven** and does not target any specific site by default,
-  - you plan to configure it **within legal and contractual boundaries**,
-  - you will respect each site’s ToS and robots.txt.
+### Adding Proxies or Header Rotation
+Use these only for legitimate operational needs (corporate egress routing, stability), not for bypassing restrictions.
 
-Good practice:
-
-- Provide a short **responsible usage** note in your proposals.
-- Offer to:
-  - confirm ToS before integrating a specific target,
-  - use official APIs wherever possible,
-  - document data sources and usage clearly.
-
-This shows that you are not just a technical implementer, but a responsible engineer.
+### Expanding Extraction Scope
+If you extend extraction beyond small numeric values:
+- reassess ToS and IP constraints
+- implement stricter access control and auditing
+- apply stronger privacy controls if personal data is involved
 
 ---
 
-## 10. Hardening the template (optional enhancements)
-This section lists possible security enhancements.
-
-If you want to push security further, consider:
-
-- **TLS/SSL enforcement**:
-  - Ensure all requests use `https` where possible.
-- **Timeouts & resource limits**:
-  - Strict HTTP timeouts,
-  - Limits on the number of concurrent requests.
-- **Logging & auditing**:
-  - Log only what is necessary,
-  - Anonymize sensitive identifiers where appropriate.
-- **Input validation**:
-  - Validate config values (e.g., threshold ranges, valid URLs).
-- **Dependency management**:
-  - Keep dependencies (requests, BeautifulSoup, etc.) up to date,
-  - Monitor for security advisories.
+## Disclaimer
+This repository is provided as a technical template and does not constitute legal advice. You are responsible for ensuring your use complies with applicable laws, regulations, and third-party terms and policies.
 
 ---
 
-## 11. Disclaimer
-This section restates the legal disclaimer.
-
-This document provides **general** security and legal considerations for using the Rate Monitor Template. It:
-
-- is not exhaustive,
-- does not account for all jurisdictions or domains,
-- is not legal advice.
-
-For any substantial or commercial deployment, especially involving:
-
-- personal data,
-- proprietary or paid data sources,
-- high-volume or high-frequency access,
-
-you should consult:
-
-- a qualified legal professional,
-- the relevant Terms of Service and licensing documents,
-- your client’s internal policies.
-
----
-
-## 12. Summary
-This section summarizes key responsibilities.
-
-- The template is technically simple, but legal/ethical context is **not** simple.
-- You must:
-  - respect ToS and robots.txt,
-  - implement responsible rate limiting,
-  - protect secrets and data,
-  - avoid bypassing protections,
-  - communicate clearly with clients.
-
-Used responsibly, this template can serve as a **clean, professional foundation** for rate monitoring projects that are both technically solid and compliant with real-world constraints.
+## Related Documentation
+- `README.md`
+- `docs/architecture.md`
+- `docs/CONFIG_GUIDE.md`
+- `docs/operations.md`
+- `docs/testing.md`

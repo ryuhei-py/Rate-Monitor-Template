@@ -1,615 +1,616 @@
-# Operations
-This section describes how to run, operate, and maintain the template, preserving the existing guidance.
+# Operations Guide
 
-This document describes how to **run, operate, and maintain** the Rate Monitor Template in real-world environments.
-
-It covers:
-
-- local development and ad-hoc runs,
-- configuration management,
-- database handling (initialize, backup, rotate, reset),
-- scheduling on Linux/macOS (cron) and Windows (Task Scheduler),
-- logging and basic monitoring,
-- handling secrets and environment variables,
-- simple upgrade and migration patterns.
-
-The goal is to show how this template can be operated like a small production system, while staying lightweight and easy to understand.
+This document describes how to run, schedule, observe, and maintain the **Rate Monitor Template** safely and reliably. It is aligned with the current implementation under `src/rate_monitor/` and documents operational behavior as it actually exists today.
 
 ---
 
-## 1. Runtime environments
-This section lists supported environments and requirements.
+## Contents
 
-The template is designed to run in:
-
-- **Local development environments**
-  - Windows (PowerShell, Command Prompt)
-  - macOS / Linux (bash/zsh)
-- **Server environments**
-  - A small VM, EC2 instance, or on-premise machine
-  - Docker (optional, not required by default)
-- **Scheduled tasks**
-  - Cron (Linux/macOS)
-  - Windows Task Scheduler
-
-Requirements:
-
-- Python **3.11+**
-- SQLite (comes with Python’s standard library)
-- Ability to schedule recurring commands (cron / Task Scheduler)
+- [Operational Model](#operational-model)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+  - [Targets (`config/targets.yml`)](#targets-configtargetsyml)
+  - [Settings (`config/settings.yml`)](#settings-configsettingsyml)
+  - [Secrets and Environment Variables](#secrets-and-environment-variables)
+- [Running the Monitor](#running-the-monitor)
+  - [Ad-hoc Run](#ad-hoc-run)
+  - [Dry-run Mode](#dry-run-mode)
+  - [Exit Codes](#exit-codes)
+- [Outputs and Data](#outputs-and-data)
+  - [SQLite Database](#sqlite-database)
+  - [CSV Snapshot (`rates.csv`)](#csv-snapshot-ratescsv)
+  - [JSON Stats (`latest_stats.json`)](#json-stats-latest_statsjson)
+- [Alerting Semantics](#alerting-semantics)
+- [Scheduling](#scheduling)
+  - [Linux/macOS (cron)](#linuxmacos-cron)
+  - [Windows (Task Scheduler)](#windows-task-scheduler)
+- [Reliability and Failure Modes](#reliability-and-failure-modes)
+- [Logging and Observability](#logging-and-observability)
+- [Data Lifecycle and Maintenance](#data-lifecycle-and-maintenance)
+- [Security and Responsible Use](#security-and-responsible-use)
+- [Troubleshooting](#troubleshooting)
+- [Known Limitations](#known-limitations)
+- [Operational Checklists](#operational-checklists)
 
 ---
 
-## 2. Local development and ad-hoc runs
-This section explains setup and one-off runs.
+## Operational Model
 
-### 2.1 Initial setup
-This subsection shows how to clone and install dependencies.
+### What this project is
 
-# Clone repository
-```bash
-git clone https://github.com/ryuhei-py/Rate-Monitor-Template.git
-cd Rate-Monitor-Template
-```
+This project is a **single-run batch job** intended to be executed periodically by an external scheduler.
 
-# Create virtual environment
+Each run performs a fixed pipeline:
+
+1. Load settings (`config/settings.yml`) and targets (`config/targets.yml`)
+2. For each target:
+   - Fetch HTML from the target URL
+   - Parse a single numeric value using a CSS selector
+   - Insert the observation into SQLite (unless `--dry-run`)
+   - Load recent history from SQLite
+   - Compute moving-average deltas and decide whether an alert should fire
+   - Notify (stdout by default; Slack notifier exists with wiring notes)
+3. Export a per-run snapshot (`rates.csv`) and per-run stats (`latest_stats.json`)
+
+### What this project is not
+
+- Not a long-running service (no internal sleep loop).
+- Not a crawler (it only requests explicitly configured URLs).
+- Not a browser automation solution (no JS rendering, no captcha handling).
+- Not a compliance engine (you must ensure your monitoring respects each site’s Terms of Service and policies).
+
+---
+
+## Prerequisites
+
+### Runtime
+
+- Python 3.11+ (per `pyproject.toml`)
+- Network egress to the configured target URLs
+- File system permissions to read/write:
+  - SQLite DB path (default `./data/rates.db`)
+  - Output directory (default `./sample_output/`)
+
+### Recommended local layout
+
+- Use a virtual environment for dependency isolation.
+- Keep `data/` (SQLite), `logs/`, and `output/` under the repo root or a controlled directory with backups.
+
+---
+
+## Installation
+
+### 1) Create and activate a virtual environment
+
+#### Linux/macOS
 ```bash
 python -m venv .venv
-```
-
-# Activate on Windows
-```bash
-./.venv/Scripts/activate
-```
-
-# Activate on macOS / Linux
-```bash
 source .venv/bin/activate
+````
+
+#### Windows PowerShell
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-# Install dependencies
+### 2) Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2.2 Configuration files
-This subsection explains copying example configuration files.
+> Note: `requirements.txt` includes runtime dependencies and development/testing tools.
 
-# Copy example configs
+---
+
+## Configuration
+
+This project requires two configuration files:
+
+* `config/targets.yml` — defines what to monitor
+* `config/settings.yml` — defines where to store data and how to alert
+
+### Create working config files
+
 ```bash
 cp config/targets.example.yml config/targets.yml
 cp config/settings.example.yml config/settings.yml
-cp .env.example .env
 ```
 
-Edit:
+Important:
 
-`config/targets.yml`
+* `config/targets.example.yml` is fully commented in the template. A default run using only the example file can result in **zero targets processed**. Ensure you create and populate `config/targets.yml`.
 
-Add or modify targets entries (IDs, names, URLs, CSS selectors).
+---
 
-`config/settings.yml`
+### Targets (`config/targets.yml`)
 
-Set DB path, monitoring windows, alert thresholds, and Slack settings.
+#### Supported structure
 
-`.env`
+Targets can be provided as:
 
-Add secrets such as SLACK_WEBHOOK_URL if needed.
+* A mapping with a top-level `targets:` list, or
+* A top-level YAML list
 
-Field-level configuration details are documented in `docs/CONFIG_GUIDE.md`.
+Each target entry must include:
 
-### 2.3 Running the monitor once (manual run)
-This subsection shows how to run the CLI once.
+* `id` (string): stable key for DB, exports, and stats
+* `name` (string): human-readable label
+* `url` (string): the page to fetch
+* `selector` (string): CSS selector used with BeautifulSoup `select_one`
 
-# Run the CLI
+#### Minimal example
+
+```yaml
+targets:
+  - id: usd_jpy
+    name: USD/JPY
+    url: "https://example.com/rates"
+    selector: ".rate"
+```
+
+#### Operational guidance
+
+* Keep `id` stable; changing it creates a new series in SQLite.
+* Use selectors that match a single element with a clean numeric text.
+* Re-validate selectors periodically; DOM changes are the most common operational failure cause.
+
+---
+
+### Settings (`config/settings.yml`)
+
+#### Supported fields (current implementation)
+
+```yaml
+db:
+  path: "./data/rates.db"
+
+monitoring:
+  interval_seconds: 300  # informational; scheduling is external
+
+alerts:
+  enabled: false         # parsed but not enforced by CLI
+  threshold: 5.0         # percent threshold used by CLI
+
+slack:
+  webhook_url: ""        # stored; Slack selection requires wiring changes (see Known Limitations)
+  channel: ""            # stored; not used by notifier
+```
+
+#### Important behavior
+
+* `db.path` must be writable; the parent directory must be creatable.
+* `alerts.threshold` is the only alert-related setting used by the CLI today:
+
+  * If missing or `null`, the CLI treats it as `0.0`.
+  * A threshold of `0.0` can create noisy alerts once enough history exists.
+
+---
+
+### Secrets and Environment Variables
+
+This repo includes `.env.example`, but the current runtime **does not load `.env` automatically** and does not read Slack/webhook settings from environment variables.
+
+Operationally safe approaches:
+
+* Store secrets as OS-level environment variables or scheduler-managed secrets.
+* For CI usage, store secrets in GitHub Actions Secrets.
+* Do not commit secrets into YAML config files.
+
+If you extend the runtime to load `.env`, ensure `.env` remains excluded (it is in `.gitignore`).
+
+---
+
+## Running the Monitor
+
+### Source layout note (`src/` layout)
+
+The code lives under `src/rate_monitor/`. To run without packaging changes, ensure `src/` is importable.
+
+#### Linux/macOS
+
 ```bash
-python -m rate_monitor.cli \
+PYTHONPATH=src python -m rate_monitor.cli \
   --targets config/targets.yml \
   --settings config/settings.yml \
   --output-dir sample_output
 ```
 
-This command will:
+#### Windows PowerShell
 
-Load settings and targets.
-
-Initialize a SQLite database (if it does not exist yet).
-
-Fetch current HTML for each target.
-
-Parse the latest rate values.
-
-Insert new records into the database.
-
-Analyze historical data and detect abnormal changes.
-
-Export:
-
-history → sample_output/rates.csv
-
-stats → sample_output/latest_stats.json
-
-Send alerts via stdout or Slack (depending on configuration).
-
-### 2.4 Dry-run mode
-This subsection shows how to run without DB writes.
-
-# Run in dry-run mode
-```bash
-python -m rate_monitor.cli --dry-run
-```
-
-Dry-run will still:
-
-perform HTTP requests,
-
-parse values,
-
-run analysis,
-
-export stats/history (depending on implementation),
-
-but will not call insert_rate() on the database.
-
----
-
-## 3. Configuration management
-This section explains how to manage configs across environments.
-
-### 3.1 Files
-`config/targets.yml`
-
-List of monitoring targets.
-
-`config/settings.yml`
-
-Global behaviour (DB path, windows, thresholds, Slack config).
-
-`.env`
-
-Environment-specific secrets (Slack webhook, etc.)
-
-### 3.2 Environment-specific configs
-This subsection shows how to use per-environment files.
-
-For multiple environments (dev/stage/prod), you can:
-
-Use different config files:
-
-`config/targets.dev.yml`, `config/settings.dev.yml`
-
-`config/targets.prod.yml`, `config/settings.prod.yml`
-
-Pass them to the CLI explicitly:
-
-# Run with explicit configs
-```bash
-python -m rate_monitor.cli \
-  --targets config/targets.prod.yml \
-  --settings config/settings.prod.yml \
-  --output-dir /var/data/rate-monitor/output
-```
-
-Use different `.env` files per environment
-
-Managed by your deployment tool, not committed to Git.
-
-### 3.3 Best practices
-Never commit secrets (.env, real webhook URLs) to the repo.
-
-Commit only *.example files, with placeholders and comments.
-
-Keep environment-specific config in:
-
-private repositories,
-
-environment variables,
-
-or deployment tools (Ansible, Terraform, etc.).
-
----
-
-## 4. Database operations
-This section explains how to initialize, back up, and reset the database.
-
-The template uses a single SQLite database file (configurable via settings.yml).
-
-### 4.1 Location and initialization
-This subsection shows defaults and initialization.
-
-The default location might look like:
-
-```yaml
-# config/settings.yml
-db:
-  path: "data/rates.sqlite3"
-```
-
-On first run, the CLI will:
-
-Create the file if it does not exist.
-
-Invoke RateDatabase.init_schema() to create the rates table and indexes.
-
-You can also trigger schema initialization manually from a Python REPL:
-
-# Initialize schema manually
-```python
-from rate_monitor.db import RateDatabase
-from rate_monitor.config import load_settings
-
-settings = load_settings("config/settings.yml")
-db = RateDatabase(settings.db.path)
-db.init_schema()
-```
-
-### 4.2 Backup
-This subsection shows how to back up SQLite.
-
-SQLite databases are simple files. For backup:
-
-Stop the scheduled job (or ensure no ongoing writes).
-
-Copy the file:
-
-# Copy backup on Unix-like systems
-```bash
-cp data/rates.sqlite3 backups/rates.sqlite3-$(date +%Y%m%d%H%M%S)
-```
-
-On Windows (PowerShell):
-
-# Copy backup on Windows
 ```powershell
-Copy-Item data/rates.sqlite3 ("backups/rates.sqlite3-" + (Get-Date -Format "yyyyMMddHHmmss"))
+$env:PYTHONPATH = "src"
+python -m rate_monitor.cli `
+  --targets config/targets.yml `
+  --settings config/settings.yml `
+  --output-dir sample_output
 ```
 
-Automate this via cron / Task Scheduler if needed (e.g., daily at night).
+### Ad-hoc run
 
-### 4.3 Rotation and retention
-This subsection explains rotation practices.
+Typical one-off run:
 
-For long-running systems:
-
-Keep a rolling window of backups (e.g., last 7 or 30).
-
-Use simple housekeeping scripts to delete older backup files.
-
-SQLite itself can handle large databases, but for very long histories you can:
-
-Periodically export old data to CSV and delete them from the DB, or
-
-Switch to an external DB backend (see Architecture doc for hints).
-
-### 4.4 Reset / rebuild
-This subsection explains how to reset.
-
-To reset the database:
-
-Stop any scheduled jobs.
-
-Move or delete the DB file:
-
-# Remove database file
 ```bash
-rm data/rates.sqlite3
-```
-
-Run the CLI again; init_schema() will recreate the schema on the next run.
-
-Be careful: this removes all historical data.
-
----
-
-## 5. Scheduling
-This section explains how to schedule periodic runs.
-
-The monitor is designed to be run periodically.
-You can schedule it with cron (Linux/macOS) or Task Scheduler (Windows).
-
-### 5.1 Linux / macOS – cron
-This subsection shows cron usage.
-
-Edit the crontab:
-
-# Open crontab editor
-```bash
-crontab -e
-```
-
-Add an entry (example: run once every hour):
-
-# Hourly cron entry
-```cron
-0 * * * * cd /path/to/Rate-Monitor-Template && \
-/path/to/.venv/bin/python -m rate_monitor.cli \
+PYTHONPATH=src python -m rate_monitor.cli \
   --targets config/targets.yml \
   --settings config/settings.yml \
-  --output-dir /var/data/rate-monitor/output >> /var/log/rate-monitor.log 2>&1
+  --output-dir output/runs/latest
 ```
+
+### Dry-run mode
+
+Dry-run is intended for safe target onboarding and selector verification.
+
+```bash
+PYTHONPATH=src python -m rate_monitor.cli --dry-run \
+  --targets config/targets.yml \
+  --settings config/settings.yml \
+  --output-dir output/runs/dry_run
+```
+
+Dry-run behavior:
+
+* Does **not** insert rows into SQLite.
+* Still fetches and parses live targets.
+* Still computes analysis (it appends the current observation in-memory).
+* Still exports CSV/JSON outputs.
+
+### Exit codes
+
+* `0`: run completed successfully
+* `1`: an exception occurred (printed as `Error: ...` to stderr)
+
+---
+
+## Outputs and Data
+
+A run produces up to three primary artifacts.
+
+### SQLite Database
+
+* Default: `./data/rates.db` (configurable via `db.path`)
+* Schema:
+
+  * Table `rates(id, target_id, ts, value)`
+  * Index on `(target_id, ts)`
+
+Timestamp semantics:
+
+* The CLI stores timestamps as **naive UTC** ISO strings (timezone removed before storing).
+
+Operational implications:
+
+* Avoid concurrent runs writing to the same SQLite file.
+* Backups are straightforward file copies when the job is idle.
+
+---
+
+### CSV Snapshot (`rates.csv`)
+
+* Path: `<output-dir>/rates.csv`
+* Columns: `timestamp,target_id,value`
+* Semantics: **one row per processed target for the current run**
+
+This file is a per-run snapshot, not a historical export.
+
+---
+
+### JSON Stats (`latest_stats.json`)
+
+* Path: `<output-dir>/latest_stats.json`
+* Structure: a list of per-target stats objects including:
+
+  * `current`
+  * `short_avg`, `long_avg`
+  * `change_from_short_pct`, `change_from_long_pct`
+  * `should_alert`
+  * `reason`
+
+---
+
+## Alerting Semantics
+
+### Windowing model
+
+The analyzer computes moving averages over the **last N observations**, not “last N days.”
+
+Current CLI values:
+
+* short window: **3 observations**
+* long window: **7 observations**
+
+### Threshold model
+
+An alert triggers when either of these is true:
+
+* `abs(change_from_short_pct) > threshold`
+* `abs(change_from_long_pct) > threshold`
 
 Notes:
 
-Adjust /path/to/Rate-Monitor-Template and .venv path as appropriate.
+* The comparison is strictly `>` (not `>=`).
+* If the baseline average is `0`, percent change is undefined and treated as `null`.
 
-Redirect stdout / stderr to a log file for debugging (>> /var/log/... 2>&1).
+### Warm-up period
 
-You can choose other schedules, e.g.:
+Alerts require enough history to compute averages:
 
-every 15 minutes: */15 * * * *
+* Fewer than 3 observations → short average is `null` → no short alerts
+* Fewer than 7 observations → long average is `null` → no long alerts
 
-once a day at 09:00: 0 9 * * *
+Expect a natural warm-up period when deploying new targets.
 
-### 5.2 Windows – Task Scheduler
-This subsection shows Task Scheduler usage.
+### Analytical nuance (dampening)
 
-Open Task Scheduler.
+The moving average is computed over the tail that includes the current observation. This slightly dampens deltas compared to baselines that exclude the latest point.
 
-Create Basic Task:
+---
 
-Name: Rate Monitor
+## Scheduling
 
-Trigger: e.g., “Daily” or “Every 1 hour”.
+Scheduling is external. Choose a cadence that is respectful of target sites and appropriate for the signal you want.
 
-Action: “Start a program”
+General guidance:
 
-Program/script:
+* Prefer longer intervals over aggressive polling.
+* Align cadence with expected update frequency (e.g., hourly, daily).
+* Avoid overlapping runs (especially with SQLite).
 
-# Program path
+### Linux/macOS (cron)
+
+Example: run hourly, create a timestamped output folder, and write logs.
+
+```cron
+0 * * * * cd /path/to/Rate-Monitor-Template && \
+  . .venv/bin/activate && \
+  PYTHONPATH=src python -m rate_monitor.cli \
+    --targets config/targets.yml \
+    --settings config/settings.yml \
+    --output-dir output/runs/$(date +\%Y\%m\%d_\%H\%M) \
+  >> logs/monitor.log 2>> logs/monitor.err
+```
+
+Recommendations:
+
+* Keep `logs/` and `output/runs/` under a controlled directory.
+* Use log rotation to avoid unbounded file growth.
+
+### Windows (Task Scheduler)
+
+Suggested approach:
+
+* Action: start `powershell.exe`
+* “Start in”: repository root directory
+* Example command (adapt paths as needed):
+
 ```powershell
-powershell.exe
+$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe -m rate_monitor.cli --targets config\targets.yml --settings config\settings.yml --output-dir output\runs\latest
 ```
 
-Add arguments:
+Common pitfalls:
 
-# PowerShell Task Scheduler command
-```powershell
--Command "cd C:/path/to/Rate-Monitor-Template; `
-  ./.venv/Scripts/python.exe -m rate_monitor.cli `
-  --targets config/targets.yml `
-  --settings config/settings.yml `
-  --output-dir C:/path/to/output `
-  >> C:/path/to/logs/rate-monitor.log 2>&1"
-```
-
-Ensure “Start in” is set to the project directory or handle it in the command.
-
-As with cron, you can adjust frequency, log paths, and CLI options.
-
-### 5.3 Docker (optional)
-This subsection notes optional containerization.
-
-Although not required, you can wrap the CLI into a Docker container:
-
-Dockerfile (example outline):
-
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-COPY . /app
-
-RUN pip install --no-cache-dir -r requirements.txt
-
-CMD ["python", "-m", "rate_monitor.cli", "--targets", "config/targets.yml", "--settings", "config/settings.yml", "--output-dir", "sample_output"]
-```
-
-Then schedule via:
-
-host cron calling docker run, or
-
-a container orchestrator (k8s CronJob, etc.).
-
-This is beyond the scope of the template, but the architecture supports it.
+* Wrong working directory (relative paths break).
+* Insufficient permissions to write `data/` or `output/`.
+* Overlapping runs due to long network timeouts.
 
 ---
 
-## 6. Logging and basic monitoring
-This section explains logging expectations.
+## Reliability and Failure Modes
 
-### 6.1 Default logging
-By default, the template uses:
+### Network failures
 
-print or simple logging to stdout for:
+Fetcher behavior:
 
-high-level progress,
+* Retries on network exceptions and HTTP 5xx.
+* Does not implement special handling for HTTP 429 or backoff strategies.
 
-alerts via StdoutNotifier,
+Mitigations:
 
-error messages in the CLI.
+* Choose conservative schedules.
+* If 429/blocks occur frequently, extend the fetcher with exponential backoff and/or use an approved API where available.
 
-When scheduled, redirect output to a log file as shown in the cron / Task Scheduler examples.
+### Parsing failures
 
-### 6.2 Integrating Python logging
-For more formal logging:
+Typical causes:
 
-Replace print statements in cli.py, notifier.py, etc. with Python’s logging module.
+* Selector mismatch due to DOM changes
+* Locale differences affecting numeric formatting
+* Bot mitigation returning alternate HTML
 
-Configure log format and level at program start:
+Mitigations:
 
-# Configure logging
-```python
-import logging
+* Validate new targets with `--dry-run`.
+* Re-check selectors periodically.
+* Prefer stable page elements (IDs/classes less likely to change).
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-```
+### Single-point failure behavior
 
-Send logs to:
+The CLI wraps the entire run; an uncaught failure will end the process with exit code 1.
 
-a rotating file (using logging.handlers),
+Operational strategy:
 
-syslog,
-
-or a centralized logging solution.
-
-### 6.3 Health checks and sanity checks
-Simple health indicators:
-
-DB sanity:
-
-get_history() returns data for active targets.
-
-Alert sanity:
-
-If no alerts for a long time, ensure the job is still running and history is being recorded.
-
-Log review:
-
-Periodically review log files for errors like FetchError, ParseError, NotificationError.
-
-For more advanced setups, you can expose a tiny HTTP endpoint or write a heartbeat file, but that is out of scope for this template.
+* Keep high-risk targets isolated (separate schedules or separate runs) if partial success is required.
+* Capture stderr and monitor for failures.
 
 ---
 
-## 7. Secrets and environment variables
-This section explains handling secrets.
+## Logging and Observability
 
-Secrets (e.g. Slack webhook URLs) should not be committed.
+Current behavior:
 
-### 7.1 .env file
-.env.example documents expected variables:
+* Minimal stdout/stderr output
+* No structured logging or metrics emission
 
-```env
-# Slack integration (optional)
-SLACK_WEBHOOK_URL=
-SLACK_CHANNEL=#alerts
-```
+Operational recommendations:
 
-In production:
+* Redirect stdout/stderr to log files in scheduled runs.
+* Track basic run signals externally:
 
-Copy .env.example → .env.
+  * number of targets processed
+  * alert count
+  * run duration
+  * error count
 
-Fill actual values in .env (but do not commit).
+If extending:
 
-Use python-dotenv or your process manager to load these variables.
+* Add structured logging (JSON) and a small summary line per run.
 
-### 7.2 Environment variables (without .env)
-Alternatively, set environment variables directly:
+---
 
-Linux/macOS:
+## Data Lifecycle and Maintenance
 
-# Export Slack vars on Unix-like systems
+### SQLite backups
+
+SQLite is a single file. Backups can be performed by copying the file when the job is not running:
+
 ```bash
-export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
-export SLACK_CHANNEL="#alerts"
+cp data/rates.db backups/rates_YYYYMMDD.db
 ```
 
-Windows (PowerShell):
+### Retention
 
-# Export Slack vars on Windows
-```powershell
-$env:SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."
-$env:SLACK_CHANNEL = "#alerts"
-```
+The DB grows over time. Consider:
 
-Your configuration loading logic can then read from environment variables or interpolate them into settings.yml.
+* Periodic archival (copy DB, then start a fresh DB)
+* Pruning old rows (requires a small maintenance script if you add one)
+
+### Export retention
+
+Exports are per-run snapshots. Recommended strategy:
+
+* Write each run to a timestamped directory for traceability, or
+* Overwrite a “latest” directory and rotate older outputs periodically.
 
 ---
 
-## 8. Upgrades and migrations
-This section explains upgrade steps.
+## Security and Responsible Use
 
-### 8.1 Code upgrades
-To upgrade the template (e.g., pulling new commits):
-
-Stop scheduled jobs.
-
-Pull new code:
-
-# Pull latest code
-```bash
-git pull origin main
-```
-
-If dependencies changed, reinstall:
-
-# Reinstall requirements
-```bash
-pip install -r requirements.txt
-```
-
-Run tests:
-
-# Run tests
-```bash
-pytest
-```
-
-Resume scheduled jobs.
-
-### 8.2 Database schema changes
-If you need to change the SQLite schema:
-
-Add migrations inside RateDatabase.init_schema():
-
-e.g., ALTER TABLE statements guarded by feature flags or version checks.
-
-Back up the DB before schema changes.
-
-Ensure tests cover the new behavior.
-
-For complex migrations, consider:
-
-Exporting data to CSV,
-
-Dropping/re-creating the DB,
-
-Re-importing data from CSV with a one-off script.
+* Respect target site Terms of Service and applicable policies.
+* Avoid aggressive scheduling and high request volume.
+* Do not attempt to bypass access controls or bot protection.
+* Treat Slack webhooks and output artifacts as potentially sensitive.
+* Keep secrets out of repositories; use a secret manager or scheduler/CI secrets.
 
 ---
 
-## 9. Operational runbook (quick reference)
-This section summarizes quick actions.
+## Troubleshooting
 
-### 9.1 Start / stop schedule
-Start: enable cron / Task Scheduler entry.
+### No targets processed (empty CSV/JSON)
 
-Stop: disable cron / Task Scheduler entry.
+Likely causes:
 
-### 9.2 Common issues
-Network errors / HTTP 5xx
+* Running with `config/targets.example.yml` (commented out)
+* `config/targets.yml` missing or empty
 
-Check connectivity and target site status.
+Fix:
 
-Confirm selectors have not changed.
+* Create and populate `config/targets.yml` with valid targets.
 
-Parse errors
+### `ModuleNotFoundError: No module named 'rate_monitor'`
 
-Target HTML changed; inspect HTML and update selector or parser.
+Cause:
 
-Slack notification failures
+* `src/` not on `PYTHONPATH`
 
-Verify webhook URL and channel.
+Fix:
 
-Check network/firewall rules.
+* Run with `PYTHONPATH=src` as shown above.
 
-### 9.3 Quick recovery steps
-Check latest log file for ERROR / Exception.
+### `ParseError: selector not found`
 
-Run the CLI manually with --dry-run to see live behavior.
+Cause:
 
-If DB is corrupted or unusable:
+* CSS selector does not match HTML returned
 
-Restore from backup.
+Fix:
 
-Or reset (delete and recreate) if historical data is non-critical.
+* Update selector, re-test with `--dry-run`.
+
+### `FetchError` (403 / 429)
+
+Cause:
+
+* Target site blocks or rate-limits automated traffic
+
+Fix:
+
+* Reduce cadence, adjust headers if appropriate, or use an approved API.
+* Consider implementing backoff for 429 if you extend the project.
+
+### Slack alerts not delivered
+
+Cause:
+
+* Slack notifier is not selectable via YAML as written (see Known Limitations)
+
+Fix:
+
+* Use stdout alerts or wire Slack enablement in code as part of a customization.
 
 ---
 
-## 10. Summary
-This section summarizes operational posture.
+## Known Limitations
 
-Operationally, the Rate Monitor Template is intentionally simple:
+These items are included to precisely reflect current behavior:
 
-It is just a Python CLI called on a schedule.
+1. **Slack notifier is implemented but not selectable via YAML as written**
 
-It uses a local SQLite file as its store.
+   * Example config includes `slack.enabled`
+   * `SlackSettings` does not define `enabled`
+   * CLI checks `settings.slack.enabled` via `getattr(..., False)`, which resolves to `False`
 
-It logs to stdout (redirectable to files).
+2. **`alerts.enabled` is parsed but not enforced by the CLI**
 
-It reads config from YAML and environment variables.
+   * Only `alerts.threshold` influences alert decisions
 
-Despite this simplicity, the structure mirrors real production systems and is designed to be extended, hardened, and deployed to suit real Upwork or client projects.
+3. **`monitoring.interval_seconds` is informational**
+
+   * Scheduling is external; the CLI does not loop
+
+4. **Window sizes are hard-coded in the CLI**
+
+   * short=3 observations, long=7 observations
+
+5. **Exports are run snapshots**
+
+   * `rates.csv` contains only the current run’s target rows
+
+6. **Timestamp format**
+
+   * DB stores naive UTC ISO timestamps
+   * Sample CSV may show timezone offsets that are not produced by the current runtime
+
+7. **SQLite in-memory special-case string**
+
+   * DB code checks `":memory__"` instead of SQLite’s conventional `":memory:"`
+
+---
+
+## Operational Checklists
+
+### Pre-deploy
+
+* [ ] Create `config/targets.yml` with at least one valid target
+* [ ] Confirm `config/settings.yml` DB path is writable
+* [ ] Set `alerts.threshold` intentionally (avoid accidental `0.0`)
+* [ ] Run once with `--dry-run` successfully
+* [ ] Run once without `--dry-run` and confirm DB writes
+* [ ] Confirm exports appear in the output directory
+
+### Weekly maintenance
+
+* [ ] Verify scheduled jobs are running and producing outputs
+* [ ] Review logs for fetch/parse failures
+* [ ] Validate selectors still match (spot-check with `--dry-run`)
+* [ ] Backup `data/rates.db` if history matters
+* [ ] Rotate logs/outputs to prevent unbounded growth
+
+### Incident triage (fast path)
+
+* [ ] Rerun with `--dry-run` to isolate DB vs fetch/parse issues
+* [ ] If parse failures: update selectors and validate
+* [ ] If fetch blocks: reduce cadence and reassess target policy
+* [ ] If DB issues: restore from backup and prevent overlapping runs

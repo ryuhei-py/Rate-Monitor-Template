@@ -1,573 +1,658 @@
 # Architecture
-This section explains the architecture of the template while preserving the original narrative.
 
-This document describes the architecture of the **Rate Monitor Template**.  
-It explains how the system is structured, how data flows through it, and how each component can be extended or replaced when adapting the template to real-world projects.
+This document describes the architecture of **Rate Monitor Template**: a config-driven, scheduler-friendly pipeline that monitors numeric rates/prices from web pages, persists time-series history in SQLite, computes baseline statistics, triggers alerts, and exports run artifacts.
 
 ---
 
-## 1. High-level overview
-This section lists the pipeline steps in order.
+## Table of Contents
 
-At a high level, the template implements the following pipeline:
+- [Purpose and Scope](#purpose-and-scope)
+- [System Overview](#system-overview)
+- [Architecture at a Glance](#architecture-at-a-glance)
+- [Runtime Flow](#runtime-flow)
+- [Configuration Model](#configuration-model)
+- [Core Modules](#core-modules)
+- [Data Model](#data-model)
+- [Exports and Artifacts](#exports-and-artifacts)
+- [Error Handling and Reliability](#error-handling-and-reliability)
+- [Operational Considerations](#operational-considerations)
+- [Security and Compliance by Design](#security-and-compliance-by-design)
+- [Testing Strategy](#testing-strategy)
+- [Extensibility](#extensibility)
+- [Known Gaps and Alignment Notes](#known-gaps-and-alignment-notes)
+- [Appendix: Directory Structure](#appendix-directory-structure)
+- [Appendix: Glossary](#appendix-glossary)
 
-1. **Config** – Load monitoring targets and settings from YAML.
-2. **Fetch** – Retrieve the latest HTML for each target’s page.
-3. **Parse** – Extract the numeric rate value from the HTML.
-4. **Store** – Append the measurement into a SQLite time-series database.
-5. **Analyze** – Compute moving averages and percentage changes for each target.
-6. **Export** – Write history and latest stats to CSV / JSON.
-7. **Notify** – Send alerts (stdout / Slack) when changes exceed thresholds.
-8. **Schedule** – Run the CLI periodically (cron / Task Scheduler).
+---
 
-Conceptually:
+## Purpose and Scope
 
+### Purpose
+Rate Monitor Template is designed to:
+- Monitor numeric values (“rates”) from web pages in a repeatable and configurable way.
+- Persist time-series observations in a lightweight SQLite database.
+- Compute simple baseline statistics (moving averages) and detect meaningful changes.
+- Emit alerts (stdout by default; Slack webhook notifier is implemented).
+- Export run outputs (CSV snapshot + JSON stats) for downstream usage.
+
+### In scope
+- Single-run batch execution via CLI, intended to be scheduled externally (cron / Windows Task Scheduler).
+- HTML fetch → parse numeric value → store → analyze → notify → export.
+- SQLite persistence and history retrieval.
+
+### Out of scope (by design)
+- Long-running daemon loop (interval execution is handled by external scheduling).
+- Site-specific bypassing, CAPTCHA handling, robots.txt enforcement, or authentication flows.
+- High-scale crawling, distributed execution, or built-in concurrency.
+
+---
+
+## System Overview
+
+### What it monitors
+Any target where the latest numeric value is present in HTML and can be extracted via a CSS selector:
+- FX/crypto spot rates
+- Product prices (where permitted)
+- Public KPI tiles and dashboards (where permitted)
+
+### What it produces
+- **SQLite history**: appended rows `(target_id, timestamp, value)`
+- **CSV snapshot** for the current run: `rates.csv`
+- **JSON stats** for the current run: `latest_stats.json`
+- **Alerts**:
+  - Stdout alerts are supported by default.
+  - Slack webhook notifier exists but requires configuration-model alignment to be selectable from YAML (documented in [Known Gaps and Alignment Notes](#known-gaps-and-alignment-notes)).
+
+---
+
+## Architecture at a Glance
+
+### High-level component diagram
 ```mermaid
 flowchart LR
-  TargetsYAML["targets.yml"] --> ConfigLoader
-  SettingsYAML["settings.yml"] --> ConfigLoader
+  CLI["CLI (rate_monitor.cli)"] --> CFG["Config Loader (config.py)"]
+  CLI --> F["Fetcher (fetcher.py)"]
+  CLI --> P["Parser (parser.py)"]
+  CLI --> DB["SQLite DB (db.py)"]
+  CLI --> A["Analyzer (analyzer.py)"]
+  CLI --> N["Notifier (notifier.py)"]
+  CLI --> E["Exporter (exporter.py)"]
 
-  ConfigLoader["Config Loader (config.py)"] --> Fetcher["HTTP Fetcher (fetcher.py)"]
-  Fetcher --> Parser["Rate Parser (parser.py)"]
-  Parser --> DB["SQLite DB (db.py)"]
+  F -->|HTML| P
+  P -->|float value| CLI
+  CLI -->|insert/query| DB
+  DB -->|history| A
+  A -->|RateStats| N
+  CLI -->|rows + stats| E
+````
 
-  DB --> Analyzer["Analyzer (analyzer.py)"]
-  Analyzer --> Exporter["Exporters (exporter.py)"]
-  Analyzer --> Notifier["Notifier (notifier.py)"]
+### Design principles (why it is structured this way)
 
-  CLI["CLI (cli.py)"] --> ConfigLoader
-  CLI --> Fetcher
-  CLI --> DB
-  CLI --> Analyzer
-  CLI --> Exporter
-  CLI --> Notifier
+* **Config-driven**: targets and key parameters are externalized for fast adaptation.
+* **Boundary isolation**: network, parsing, persistence, analysis, notifications, exports are separate modules.
+* **Scheduler-friendly**: one run equals one deterministic batch, enabling clean cron/Task Scheduler operation.
+* **Testability**: modules are small and mock-friendly; tests avoid live network dependencies.
+
+---
+
+## Runtime Flow
+
+### Entry point and CLI arguments
+
+Entrypoint:
+
+* `python -m rate_monitor.cli`
+
+Arguments:
+
+* `--targets` (default: `config/targets.example.yml`)
+* `--settings` (default: `config/settings.example.yml`)
+* `--output-dir` (default: `sample_output`)
+* `--dry-run` (flag; skips DB inserts)
+
+### Single-run lifecycle (exact flow)
+
+1. Load settings from YAML.
+2. Load targets from YAML.
+3. Initialize SQLite schema (table + index).
+4. For each target:
+
+   * Fetch HTML from the target URL.
+   * Parse a numeric value using the target’s CSS selector.
+   * Insert into SQLite (skipped in dry-run).
+   * Retrieve recent history from SQLite (time-windowed by days).
+   * Analyze history to produce `RateStats` (moving averages over last N observations).
+   * Notify when alert conditions are met.
+   * Append export rows for the current run.
+5. Write exports: CSV snapshot (`rates.csv`) and JSON stats (`latest_stats.json`).
+
+### Dry-run behavior
+
+Dry-run is intended to validate configuration safely:
+
+* No SQLite writes occur.
+* Fetching and parsing still happen (real HTTP requests are performed).
+* The current observation is appended in-memory to the fetched history before analysis.
+* Exports still run.
+
+---
+
+## Configuration Model
+
+All configuration is loaded from YAML via `rate_monitor.config`.
+
+### Targets configuration
+
+Supported YAML shapes:
+
+* A top-level mapping with `targets: [...]`, or
+* A top-level list `[...]`
+
+Each target must define:
+
+* `id`: stable identifier (used as the DB key)
+* `name`: human-readable label
+* `url`: page URL to fetch
+* `selector`: CSS selector that identifies the value element in the HTML
+
+Operational note:
+
+* The default `config/targets.example.yml` in this template is fully commented. If used without modification, YAML loads as `null`, resulting in **zero targets processed**. For real runs, create an active targets file with actual entries.
+
+### Settings configuration
+
+Supported sections and fields (as implemented):
+
+#### `db`
+
+* `path` (string, default: `./data/rates.db`)
+
+#### `monitoring`
+
+* `interval_seconds` (int, default: `300`)
+
+  * Parsed and stored in settings, but **not used** to drive a runtime loop. Scheduling is intended to be external.
+
+#### `alerts`
+
+* `enabled` (bool, default: `false`)
+
+  * Parsed but **not enforced** by the CLI runtime (see [Known Gaps](#known-gaps-and-alignment-notes)).
+* `threshold` (float | null)
+
+  * Used as the percent change threshold.
+  * If unset (`null`), the CLI treats it as `0.0` when selecting the threshold.
+
+#### `slack`
+
+* `webhook_url` (string | null)
+* `channel` (string | null)
+
+  * Parsed but not used in Slack payload construction.
+
+---
+
+## Core Modules
+
+### `rate_monitor.cli`
+
+**Role**: Orchestrates a single end-to-end run.
+
+Key responsibilities:
+
+* Parse CLI arguments.
+* Load settings/targets.
+* Initialize database schema.
+* Run the per-target pipeline.
+* Export CSV/JSON.
+* Handle top-level failure reporting.
+
+Important runtime defaults:
+
+* Analysis windows are currently hard-coded in the CLI:
+
+  * `window_short = 3` (observations)
+  * `window_long = 7` (observations)
+* History query uses a time cutoff:
+
+  * `days = window_long` (i.e., last 7 days)
+
+Failure model:
+
+* A broad top-level exception handler aborts the run on any unhandled exception and prints a single `Error: ...` line to stderr.
+
+### `rate_monitor.config`
+
+**Role**: Typed YAML configuration loader.
+
+Responsibilities:
+
+* Convert YAML into dataclasses (`TargetConfig`, `Settings`, etc.).
+* Validate required fields and fail fast on invalid structure.
+
+Guarantees:
+
+* If a targets file parses as `null`, it returns an empty list (no targets), not an exception.
+
+### `rate_monitor.fetcher`
+
+**Role**: Network access boundary (HTTP GET).
+
+Behavior:
+
+* Uses `requests.get(..., timeout=10)`.
+* Sets basic headers including a static User-Agent string.
+* Retries on:
+
+  * network exceptions (`requests.exceptions.RequestException`)
+  * HTTP 5xx responses
+* Does not retry on HTTP 4xx by default (including 429).
+
+Errors:
+
+* Raises `FetchError` after retry exhaustion.
+
+### `rate_monitor.parser`
+
+**Role**: HTML-to-float conversion boundary.
+
+Behavior:
+
+* Uses BeautifulSoup with `select_one(selector)` to find a single element.
+* Extracts `.get_text(strip=True)`.
+* Normalizes common numeric formats:
+
+  * Strips currency symbols (`¥`, `$`, `€`)
+  * Handles comma/dot thousands and decimal conventions
+* Converts to `float`.
+
+Errors:
+
+* Raises `ParseError` if the selector does not match or conversion fails.
+
+### `rate_monitor.db`
+
+**Role**: SQLite persistence and history retrieval.
+
+Responsibilities:
+
+* Initialize schema.
+* Insert new observations.
+* Retrieve recent history for analysis.
+
+Schema:
+
+* Table `rates(id, target_id, ts, value)`
+* Index on `(target_id, ts)`.
+
+Timestamp semantics:
+
+* The CLI uses `datetime.now(timezone.utc).replace(tzinfo=None)`:
+
+  * timestamps are **naive UTC** (no offset stored)
+* Stored as ISO strings (`ts.isoformat()`).
+
+History retrieval:
+
+* `get_history(target_id, days=N)` filters rows with `ts >= cutoff.isoformat()` where cutoff is computed as “now UTC minus N days”.
+
+Implementation note:
+
+* The in-memory DB special-case check uses `:memory__` rather than SQLite’s conventional `:memory:`. This is a minor edge-case issue (see [Known Gaps](#known-gaps-and-alignment-notes)).
+
+### `rate_monitor.analyzer`
+
+**Role**: Baselines, percent deltas, and alert decision.
+
+Inputs:
+
+* Time-ordered history `[(timestamp, value), ...]`
+* Short/long observation windows
+* Percent threshold
+* Target id
+
+Outputs:
+
+* `RateStats` including:
+
+  * `current`
+  * `short_avg`, `long_avg`
+  * `change_from_short_pct`, `change_from_long_pct`
+  * `should_alert`, `reason`
+
+Alert logic:
+
+* Triggers when `abs(change_pct) > threshold_percent` (strictly greater-than).
+* If `base == 0` or insufficient history for a window, percent change is `None`.
+
+Analytical nuance:
+
+* Moving averages are computed over the tail that includes the most recent observation (the “current” point). This tends to reduce the apparent delta compared to a baseline that excludes the current value.
+
+### `rate_monitor.notifier`
+
+**Role**: Alert delivery boundary.
+
+Implementations:
+
+* `StdoutNotifier`
+
+  * Prints alerts only when `should_alert` is true.
+* `SlackNotifier`
+
+  * Posts to an incoming webhook with JSON payload `{"text": "..."}`
+  * Uses `requests.post(..., timeout=5)`
+
+Notes:
+
+* `slack.channel` is not used in payload construction.
+* Slack notifier selection from YAML is not fully aligned with the settings model (see [Known Gaps](#known-gaps-and-alignment-notes)).
+
+Errors:
+
+* Raises `NotificationError` on Slack POST failures.
+
+### `rate_monitor.exporter`
+
+**Role**: Export run artifacts.
+
+CSV (`rates.csv`):
+
+* Header: `timestamp,target_id,value`
+* One row per target in the current run (snapshot), not full history.
+
+JSON (`latest_stats.json`):
+
+* List of `RateStats` values as dictionaries.
+
+Filesystem behavior:
+
+* Ensures parent directories exist before writing.
+
+### `rate_monitor.scheduler_stub`
+
+**Role**: Scheduling examples.
+
+* Contains example command strings for cron / Task Scheduler usage.
+* There is no runtime scheduler dependency; scheduling is external by design.
+
+---
+
+## Data Model
+
+### Domain types
+
+#### TargetConfig
+
+* `id` (string): stable identifier for DB and exports
+* `name` (string): human label
+* `url` (string): fetch URL
+* `selector` (string): CSS selector for extraction
+
+#### RateStats
+
+* `target_id` (string)
+* `current` (float)
+* `short_avg` (float | null)
+* `long_avg` (float | null)
+* `change_from_short_pct` (float | null)
+* `change_from_long_pct` (float | null)
+* `should_alert` (bool)
+* `reason` (string)
+
+### SQLite schema
+
+```sql
+CREATE TABLE IF NOT EXISTS rates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  target_id TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  value REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rates_target_ts
+ON rates (target_id, ts);
 ```
 
-Everything is orchestrated from a single CLI entrypoint (rate_monitor.cli.main), which can be called ad-hoc or via a scheduler.
+---
+
+## Exports and Artifacts
+
+### `rates.csv` (current-run snapshot)
+
+Purpose:
+
+* Provide the latest observed value per target for this run in a simple, tool-friendly format.
+
+Characteristics:
+
+* Snapshot only (not historical export).
+* One line per target processed.
+
+### `latest_stats.json` (current-run computed stats)
+
+Purpose:
+
+* Provide analysis results and alert decisions in a machine-readable form.
+
+Characteristics:
+
+* Contains baseline comparisons and `should_alert` decisions.
+* Intended for dashboards, pipelines, or additional automation steps.
 
 ---
 
-## 2. Goals and non-goals
-This section clarifies the intended scope.
+## Error Handling and Reliability
 
-### 2.1 Goals
-Provide a clean, layered skeleton for rate/time-series monitoring projects.
+### Error categories
 
-Demonstrate production-like structure in a small, understandable codebase.
+* Fetch failures (network exceptions, HTTP errors)
+* Parse failures (selector missing, non-numeric value)
+* DB failures (SQLite read/write, filesystem)
+* Notification failures (Slack webhook)
+* Export failures (permissions, path issues)
 
-Make it easy to:
+### Current reliability characteristics
 
-add new monitoring targets,
+* Retries exist only for transient fetch failures (network exceptions, 5xx).
+* No explicit backoff strategy for rate limiting (429).
+* One unhandled exception aborts the entire run.
+* No per-target isolation is implemented.
 
-change alert thresholds,
+Operational implications:
 
-plug in new notification channels,
-
-reuse the architecture in Upwork-style client projects.
-
-### 2.2 Non-goals
-Not a full observability stack (no metrics backend, no dashboards).
-
-Not a heavy framework; no external schedulers or ORMs by default.
-
-Not tied to a specific website, API, or asset class.
-
-Not optimized for ultra-high frequency or huge data volumes out of the box.
+* Use conservative scheduling and consider backoff if targets can rate-limit.
+* If monitoring many heterogeneous targets, consider isolating failures per target (extension).
 
 ---
 
-## 3. Module overview
-This section maps modules to responsibilities.
+## Operational Considerations
 
-All core logic lives under `src/rate_monitor/`:
+### Scheduling model
+
+This project is intended to run under an external scheduler:
+
+* cron (Linux/macOS)
+* Windows Task Scheduler
+
+`monitoring.interval_seconds` is currently not used to run an internal loop.
+
+### Storage growth and retention
+
+SQLite will grow as each run appends points:
+
+* Define a retention policy (e.g., keep last 90 days).
+* Back up the DB if it becomes a valuable dataset.
+* Consider maintenance routines (vacuum/compaction) for long-running deployments.
+
+### Observability
+
+Current behavior:
+
+* Alerts go to stdout.
+* Errors print a single line to stderr.
+
+Common production improvements (optional extensions):
+
+* Structured logs (JSON)
+* Per-target status reporting
+* Run duration metrics and success/failure counters
+
+See `docs/operations.md` for operational practices.
+
+---
+
+## Security and Compliance by Design
+
+This template is intentionally conservative:
+
+* No authentication bypass features.
+* No scraping evasion mechanisms.
+* External scheduling provides explicit control of request rate.
+* The operator must ensure targets comply with site Terms of Service and applicable laws.
+
+Secrets handling:
+
+* Slack webhook URLs should be treated as secrets and managed via secure mechanisms.
+* `.env.example` exists, but runtime does not automatically load `.env` without additional implementation (see [Known Gaps](#known-gaps-and-alignment-notes)).
+
+See `docs/SECURITY_AND_LEGAL.md` for broader guidance.
+
+---
+
+## Testing Strategy
+
+### What is tested
+
+The test suite is unit-test focused and avoids live network dependency:
+
+* Fetcher retry behavior (mocked)
+* Parser normalization and failure cases
+* SQLite schema creation and history filtering
+* Analyzer calculations and alert logic
+* Notifier behavior (Slack mocked)
+* Exporter CSV/JSON output
+* CLI orchestration in dry-run mode (via monkeypatching)
+* Scheduler stub content
+
+### What is intentionally not tested
+
+* Live scraping against real sites (nondeterministic and ToS-sensitive).
+
+CI:
+
+* GitHub Actions runs pytest.
+* `tests/conftest.py` adds `src/` to `sys.path` to allow imports during tests without installing the package.
+
+See `docs/testing.md` for commands and coverage notes.
+
+---
+
+## Extensibility
+
+The codebase is intentionally modular. Common extension paths:
+
+* Add per-target request configuration (headers, timeouts, proxies).
+* Add alternative parsers (regex-based numeric extraction, JSON endpoints).
+* Make analysis windows configurable and clarify “days vs observations”.
+* Improve baselines (exclude current observation from averages, robust statistics).
+* Add notifier backends (Email, Teams, generic webhooks).
+* Add retention and maintenance commands (delete old rows, compact DB).
+* Add per-target isolation to prevent one failing target from aborting the run.
+
+---
+
+## Known Gaps and Alignment Notes
+
+This section documents current mismatches and limitations so the repository remains credible and internally consistent.
+
+### Slack enablement mismatch
+
+* Example settings may include `slack.enabled`, but the current `SlackSettings` model does not define `enabled`.
+* Notifier selection uses `getattr(settings.slack, "enabled", False)`, so it defaults to stdout in practice.
+* `slack.channel` is parsed but not used in Slack payload construction.
+
+### `alerts.enabled` is parsed but not enforced
+
+* The CLI uses only `alerts.threshold` to decide whether to trigger alerts.
+
+### `monitoring.interval_seconds` is parsed but not used at runtime
+
+* Execution frequency is intended to be controlled by external scheduling.
+
+### Analysis windows are hard-coded in the CLI
+
+* `window_short = 3`, `window_long = 7` (observation-based moving averages).
+* History retrieval uses a time window of `days = 7` (last 7 days), which is not the same concept as “last 7 observations” if scheduled frequently.
+
+### `.env` and environment variables
+
+* `.env.example` exists and `python-dotenv` is listed in dependencies.
+* Runtime code does not currently load `.env` automatically.
+
+### SQLite in-memory special-case typo
+
+* The DB constructor special-cases `:memory__` (typo vs SQLite’s conventional `:memory:`).
+* This mainly affects directory creation behavior when using in-memory DBs.
+
+---
+
+## Appendix: Directory Structure
 
 ```text
+.github/workflows/ci.yml
+
+config/
+  settings.example.yml
+  targets.example.yml
+
+docs/
+  architecture.md
+  CONFIG_GUIDE.md
+  operations.md
+  SECURITY_AND_LEGAL.md
+  testing.md
+
 src/rate_monitor/
-├─ __init__.py
-├─ config.py
-├─ fetcher.py
-├─ parser.py
-├─ db.py
-├─ analyzer.py
-├─ exporter.py
-├─ notifier.py
-├─ scheduler_stub.py
-└─ cli.py
+  analyzer.py
+  cli.py
+  config.py
+  db.py
+  exporter.py
+  fetcher.py
+  notifier.py
+  parser.py
+  scheduler_stub.py
+
+tests/
+  conftest.py
+  test_analyzer.py
+  test_cli.py
+  test_config.py
+  test_db.py
+  test_exporter.py
+  test_fetcher.py
+  test_notifier.py
+  test_parser.py
+  test_scheduler_stub.py
+  test_smoke.py
+
+sample_output/
+  latest_stats.json
+  rates.csv
+  rates.sample.csv
+
+data/
+  rates.db
 ```
 
-### 3.1 Config layer (config.py)
-This subsection explains configuration responsibilities.
-
-Responsibilities
-
-Load and validate configuration from YAML:
-
-`config/targets.yml` – list of targets to monitor.
-
-`config/settings.yml` – DB path, window sizes, alert thresholds, Slack settings, etc.
-
-Provide structured objects for the rest of the system to use.
-
-Typical concepts
-
-TargetConfig:
-
-id: str – logical identifier (e.g. "usd_jpy").
-
-name: str – human-readable name (e.g. "USD/JPY").
-
-url: str – page from which to fetch the latest rate.
-
-selector: str – CSS selector used by parser.py.
-
-Settings:
-
-db.path: str – file path for the SQLite database.
-
-monitoring.window_days_short: int
-
-monitoring.window_days_long: int
-
-alerts.change_threshold_percent: float
-
-slack.enabled: bool
-
-slack.webhook_url: str
-
-slack.channel: str
-
-Key functions (typical)
-
-load_targets(path: str) -> list[TargetConfig]
-
-load_settings(path: str) -> Settings
-
-This layer isolates all configuration concerns so that the rest of the system does not deal with raw YAML.
-
-### 3.2 Fetching layer (fetcher.py)
-This subsection explains HTTP responsibilities.
-
-Responsibilities
-
-Perform HTTP GET requests with basic robustness:
-
-Timeouts
-
-Retries on network errors and HTTP 5xx responses
-
-Customizable headers (e.g. User-Agent)
-
-Typical interface
-
-Fetcher class:
-
-__init__(self, timeout: float = 10.0, max_retries: int = 3, headers: dict | None = None)
-
-get(self, url: str) -> str
-
-Behavior
-
-On success: returns response.text.
-
-On retryable failure: retries up to max_retries.
-
-On permanent failure: raises FetchError with relevant context (URL, status code).
-
-By isolating HTTP concerns in a dedicated layer, fetch logic can be easily replaced or extended (e.g. proxies, authentication, rate-limiting).
-
-### 3.3 Parsing layer (parser.py)
-This subsection explains parsing responsibilities.
-
-Responsibilities
-
-Translate raw HTML into a numeric rate value.
-
-Typical interface
-
-RatePageParser:
-
-__init__(self, selector: str)
-
-parse(self, html: str) -> float
-
-Behavior
-
-Uses BeautifulSoup (or similar) to:
-
-Find the first element matching selector.
-
-Extract text, strip whitespace.
-
-Normalize formats like:
-
-"123.45"
-
-"123,45"
-
-"¥123.45"
-
-Convert to float.
-
-If the element is missing or parsing fails, raises ParseError.
-
-This layer handles the messy details of HTML parsing and number normalization, keeping the rest of the system working with clean float values.
-
-### 3.4 Storage layer (db.py)
-This subsection explains storage responsibilities.
-
-Responsibilities
-
-Persist time-series data to SQLite.
-
-Provide a small, focused API for inserting and querying rates.
-
-Typical schema
-
-Single table rates:
-
-id – primary key (autoincrement)
-
-target_id – text identifier of the monitored target
-
-ts – timestamp (ISO text or real datetime)
-
-value – numeric rate value
-
-Indexes:
-
-Index on (target_id, ts) for efficient per-target history queries.
-
-Typical interface
-
-RateDatabase class:
-
-__init__(self, db_path: str)
-
-init_schema(self) -> None
-
-insert_rate(self, target_id: str, timestamp: datetime, value: float) -> None
-
-get_history(self, target_id: str, days: int) -> list[tuple[datetime, float]]
-
-SQLite is chosen because it:
-
-Keeps the template self-contained (no external DB required).
-
-Is enough to prove understanding of relational storage and time-series concepts.
-
-Can be migrated to a different backend later if needed.
-
-### 3.5 Analysis layer (analyzer.py)
-This subsection explains analysis responsibilities.
-
-Responsibilities
-
-Turn raw historical values into meaningful statistics and alert decisions.
-
-Typical dataclass
-
-RateStats:
-
-target_id: str
-
-current: float | None
-
-short_avg: float | None
-
-long_avg: float | None
-
-change_from_short_pct: float | None
-
-change_from_long_pct: float | None
-
-should_alert: bool
-
-reason: str | None
-
-Typical function
-
-analyze_history(values, window_short, window_long, threshold_percent, target_id) -> RateStats
-
-Behavior
-
-If no values: returns RateStats with current=None, should_alert=False.
-
-Computes:
-
-Latest value (current).
-
-Moving averages for short and long windows (if enough data is available).
-
-Percentage changes vs. each average.
-
-Decides should_alert if absolute percentage change exceeds the configured threshold.
-
-Fills reason with human-readable context (e.g. "Short window change +6.0% > 5.0%").
-
-This layer makes the system “smart” from a monitoring perspective without being complex.
-
-### 3.6 Export layer (exporter.py)
-This subsection explains export responsibilities.
-
-Responsibilities
-
-Export history and stats for external consumption.
-
-Typical functions
-
-export_history_to_csv(rows, path) -> None
-
-Writes CSV with header timestamp,target_id,value.
-
-export_stats_to_json(stats_list, path) -> None
-
-Writes JSON array of RateStats objects.
-
-Use cases
-
-Feeding data into BI tools or spreadsheets.
-
-Providing artifacts in Upwork deliverables.
-
-Making quick visualizations from CSV/JSON.
-
-### 3.7 Notification layer (notifier.py)
-This subsection explains notification responsibilities.
-
-Responsibilities
-
-Deliver alerts to external channels in a pluggable way.
-
-Typical interfaces
-
-Base interface Notifier with:
-
-notify(self, stats: RateStats) -> None
-
-StdoutNotifier:
-
-Prints alerts to console when stats.should_alert is True.
-
-Useful for local debugging and minimal setups.
-
-SlackNotifier:
-
-Sends a JSON payload to a Slack Incoming Webhook.
-
-Only sends when stats.should_alert is True.
-
-Fails gracefully and can raise NotificationError on HTTP errors.
-
-This separation allows you to support different channels (e.g. email, Teams, SMS) without touching core logic.
-
-### 3.8 CLI layer (cli.py)
-This subsection explains orchestration responsibilities.
-
-Responsibilities
-
-Orchestrate the entire pipeline as a single entrypoint.
-
-Primary entry
-
-main() function, invocable via:
-
-# Run the CLI
-```bash
-python -m rate_monitor.cli
-```
-
-Typical CLI options
-
---targets – path to targets YAML (default: config/targets.example.yml)
-
---settings – path to settings YAML (default: config/settings.example.yml)
-
---output-dir – directory for CSV / JSON outputs (default: sample_output)
-
---dry-run – do everything except writing to DB
-
-Control flow
-
-Parse arguments.
-
-Load settings and targets.
-
-Initialize RateDatabase and schema.
-
-For each target:
-
-Fetch HTML.
-
-Parse rate.
-
-Insert into DB (unless --dry-run).
-
-For each target:
-
-Retrieve history.
-
-Compute RateStats.
-
-Export history and stats.
-
-Instantiate appropriate notifier (Slack or stdout).
-
-Notify using computed stats.
-
-### 3.9 Scheduler stub (scheduler_stub.py)
-This subsection explains the scheduling stub.
-
-Responsibilities
-
-Serve as documentation for how to schedule this CLI.
-
-Provide example cron entries and Task Scheduler commands.
-
-This file is intentionally minimal—its goal is to show clients and reviewers that you have thought about operation and scheduling, not to implement a complex scheduler in code.
-
 ---
 
-## 4. Data flow (single run)
-This section shows the sequence for one run.
+## Appendix: Glossary
 
-A single CLI run roughly follows this sequence:
-
-```mermaid
-sequenceDiagram
-    participant CLI as CLI (cli.py)
-    participant CFG as Config (config.py)
-    participant F as Fetcher (fetcher.py)
-    participant P as Parser (parser.py)
-    participant DB as DB (db.py)
-    participant AN as Analyzer (analyzer.py)
-    participant EX as Exporter (exporter.py)
-    participant NT as Notifier (notifier.py)
-
-    CLI->>CFG: load_settings(), load_targets()
-    CLI->>DB: init_schema()
-
-    loop For each target
-        CLI->>F: get(target.url)
-        F-->>CLI: html
-        CLI->>P: parse(html)
-        P-->>CLI: value (float)
-        CLI->>DB: insert_rate(target_id, ts, value)
-    end
-
-    loop For each target
-        CLI->>DB: get_history(target_id, window_long)
-        DB-->>CLI: list[(ts, value)]
-        CLI->>AN: analyze_history(...)
-        AN-->>CLI: RateStats
-    end
-
-    CLI->>EX: export_history_to_csv(...)
-    CLI->>EX: export_stats_to_json(...)
-
-    loop For each RateStats
-        CLI->>NT: notify(stats)
-    end
-```
-
-This diagram matches the conceptual architecture and helps reason about where to extend or customize behavior.
-
----
-
-## 5. Extensibility and customization
-This section lists ways to extend the system.
-
-### 5.1 Adding new targets
-To add a new rate:
-
-Add a new entry in `config/targets.yml` with id, name, url, selector.
-
-Optionally add sample rows to sample_output for documentation.
-
-No code changes are required if the HTML structure is compatible with the existing parser.
-
-### 5.2 Changing data storage
-To migrate from SQLite to another DB (e.g. PostgreSQL):
-
-Replace the internals of RateDatabase in db.py:
-
-Keep the public API (init_schema, insert_rate, get_history) stable.
-
-Adjust configuration to include connection strings or credentials.
-
-Update tests in tests/test_db.py accordingly.
-
-### 5.3 Adding new notification channels
-To add e.g. email or Microsoft Teams notifications:
-
-Create a new notifier class in notifier.py:
-
-Implement Notifier interface (notify(self, stats)).
-
-Extend CLI logic to select the new notifier based on settings.
-
-Add tests under tests/test_notifier.py.
-
-### 5.4 Changing the parsing strategy
-If a target page uses a different structure:
-
-You can:
-
-Adjust the CSS selector in targets.yml, or
-
-Extend RatePageParser to handle multiple formats, or
-
-Implement a per-target parser subclass/strategy.
-
-Because parsing is isolated, such changes do not affect DB, analysis, or notifications.
-
----
-
-## 6. Error handling and logging (conceptual)
-This section outlines error-handling expectations.
-
-The template intentionally keeps logging minimal to stay lightweight, but the architecture assumes:
-
-Fetcher:
-
-Distinguishes between network/5xx (retry) and 4xx (no retry).
-
-Raises FetchError when exhausted.
-
-Parser:
-
-Raises ParseError when HTML is malformed or formats are unexpected.
-
-Config:
-
-Raises ConfigError when required fields are missing or invalid.
-
-Notifier:
-
-Raises NotificationError on failed external calls (e.g. Slack errors).
-
-In a real project, you can:
-
-Replace print-style logging with logging module integration.
-
-Pipe logs to a central log collector or observability platform.
-
-Add more detailed error handling around the main CLI pipeline.
-
----
-
-## 7. Summary
-This section summarizes the architecture layers.
-
-The Rate Monitor Template is intentionally small but fully layered:
-
-Configuration → Fetching → Parsing → Storage → Analysis → Export → Notification → Scheduling
-
-Each layer has a clear responsibility and an explicit public interface, allowing:
-
-easy demonstration of architectural thinking to Upwork clients,
-
-safe extension and customization for production projects,
-
-reuse of patterns across other templates (Template A, Template C, and beyond).
-
-This document, together with the code, should give a reviewer or client an immediate understanding of how the system works and how it can grow.
+* **Target**: A monitored entity defined in YAML (`url` + `selector`).
+* **Selector**: CSS selector used to locate the value element in HTML.
+* **History window (days)**: Time cutoff used for querying recent rows from SQLite.
+* **Analysis window (observations)**: Count of recent points used for moving averages.
+* **Threshold**: Percent change limit that triggers an alert.
+* **Dry-run**: Execution mode that avoids DB writes while still fetching, parsing, analyzing, and exporting.

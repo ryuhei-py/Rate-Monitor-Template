@@ -1,559 +1,261 @@
 # Testing
-This section describes the testing strategy and preserves existing guidance.
 
-This document describes the testing strategy for the **Rate Monitor Template**.
-
-The goals are:
-
-- To keep the codebase **safe to modify** and **easy to refactor**.
-- To demonstrate **professional engineering practices** (unit tests, clear structure, CI).
-- To provide a **template** that can be reused and extended in client projects.
-
-The test suite is built on **pytest** and focuses on **small, fast, isolated tests**.
+This document describes how to validate correctness and prevent regressions for the Rate Monitor Template. The test suite is intentionally deterministic and offline-friendly: it does **not** depend on live websites or real third-party services.
 
 ---
 
-## 1. Overview
-This section introduces framework, scope, and philosophy.
+## Goals and Scope
 
-### 1.1 Test framework
-This subsection lists framework and structure.
+### Goals
+- Validate the core pipeline behavior: **fetch → parse → store → analyze → notify → export**.
+- Keep tests **repeatable** and **fast**, suitable for continuous integration.
+- Cover both normal flows and key failure modes (network errors, parse failures, insufficient history, notification errors).
+- Provide a clear path for extending tests when adding new features (parsing formats, notifiers, configuration behavior).
 
-- **Framework**: [pytest](https://docs.pytest.org/)
-- **Location**: `tests/` directory (mirrors `src/rate_monitor/` structure)
-- **Style**:
-  - Function-based tests (`test_...` functions).
-  - Use of fixtures (e.g. `tmp_path`, custom fixtures in `conftest.py`).
-  - Extensive use of mocking for:
-    - `requests.get` / `requests.post`
-    - database connections (when appropriate)
-    - CLI integration
-
-### 1.2 What we test
-This subsection lists coverage areas.
-
-- **Config** loading and validation
-- **DB** schema and basic CRUD behavior
-- **Fetcher** retry and error handling
-- **Parser** correctness for various HTML/number formats
-- **Analyzer** logic (moving averages, thresholds, alert decisions)
-- **Exporter** output correctness (CSV / JSON)
-- **Notifier** behavior (stdout and Slack)
-- **CLI** argument parsing and orchestration (via mocks, focused on behavior not I/O details)
-
-### 1.3 Testing philosophy
-This subsection summarizes guiding principles.
-
-- Prefer **small, focused tests** over large integration tests.
-- Keep each test **readable** and **self-explanatory**.
-- Use **mocking** to isolate external dependencies (network, Slack, etc.).
-- Ensure tests can run quickly as part of **CI** on each push / PR.
+### Non-goals
+- Live end-to-end scraping against real websites (non-deterministic and ToS-dependent).
+- Load/stress tests.
+- Full scheduler execution tests (cron/Task Scheduler). Scheduling is treated as an operational concern.
 
 ---
 
-## 2. Running tests
-This section explains how to run tests locally with examples.
+## Test Coverage Map
 
-### 2.1 Local execution
-This subsection shows basic commands.
+The repository uses a `src/` layout and module-oriented tests. The table below maps each component to its primary coverage.
 
-# Run all tests
+| Component                                                 | Responsibility                                                     | Test file(s)                   |
+|-----------------------------------------------------------|--------------------------------------------------------------------|--------------------------------|
+| `Fetcher` (`src/rate_monitor/fetcher.py`)                 | HTTP GET behavior, retries, and error classification               | `tests/test_fetcher.py`        |
+| `RatePageParser` (`src/rate_monitor/parser.py`)           | CSS selector extraction and numeric normalization                  | `tests/test_parser.py`         |
+| `RateDatabase` (`src/rate_monitor/db.py`)                 | SQLite schema creation, inserts, and time-windowed history queries | `tests/test_db.py`             |
+| Analyzer (`src/rate_monitor/analyzer.py`)                 | Moving averages, percent deltas, and alert decision logic          | `tests/test_analyzer.py`       |
+| Notifiers (`src/rate_monitor/notifier.py`)                | Stdout formatting and Slack webhook request behavior (mocked)      | `tests/test_notifier.py`       |
+| Exporters (`src/rate_monitor/exporter.py`)                | CSV/JSON output structure and file creation                        | `tests/test_exporter.py`       |
+| CLI orchestration (`src/rate_monitor/cli.py`)             | Dry-run flow, export invocation, notifier invocation               | `tests/test_cli.py`            |
+| Scheduler examples (`src/rate_monitor/scheduler_stub.py`) | Presence/sanity of scheduler command examples                      | `tests/test_scheduler_stub.py` |
+| Test import wiring                                        | Ensures `src/` is importable during tests                          | `tests/conftest.py`            |
+
+---
+
+## Test Strategy
+
+### Deterministic and offline by design
+- Tests do not call real websites.
+- HTTP behavior is simulated by patching/mocking `requests.get` and `requests.post`.
+- Files (SQLite DB, CSV, JSON) are written to temporary directories via `tmp_path`.
+
+### Boundary-focused unit tests
+Tests are organized around clear module boundaries:
+- `Fetcher`: retry policy and failure behavior
+- `Parser`: selector behavior and numeric normalization rules
+- `DB`: schema and time-window filtering correctness
+- `Analyzer`: calculation correctness and edge cases
+- `Notifiers/Exporters`: side effects validated via mocks and filesystem assertions
+- `CLI`: orchestration validated in dry-run mode via monkeypatching dependencies
+
+---
+
+## How to Run Tests Locally
+
+### Prerequisites
+- Python 3.11+ recommended (CI uses Python 3.12).
+- A virtual environment is strongly recommended.
+
+### Install dependencies
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+````
+
+### Run the full suite
+
 ```bash
 pytest
 ```
 
-This will:
+### Useful variants
 
-Discover all test files matching tests/test_*.py.
-
-Execute them using the default pytest configuration.
-
-You can run a single file:
-
-# Run one file
 ```bash
-pytest tests/test_analyzer.py
+# Quiet output
+pytest -q
+
+# Run a single test module
+pytest tests/test_parser.py
+
+# Run tests matching a substring
+pytest -k parser
 ```
 
-Or a single test function:
+### Run with CI-equivalent strictness (recommended)
 
-# Run one test
+CI treats DeprecationWarnings as errors:
+
 ```bash
-pytest tests/test_analyzer.py::test_alert_triggered_when_threshold_exceeded
+PYTHONWARNINGS=error::DeprecationWarning pytest
 ```
-
-### 2.2 Test options (useful flags)
-This subsection lists useful pytest flags.
-
-Some useful pytest options:
-
-- -v – verbose output (shows each test name)
-- -q – quiet mode
-- -x – stop on first failure
-- -k <expression> – run tests matching expression (e.g. -k "db and not slow")
-
-Examples:
-
-# Verbose run
-```bash
-pytest -v
-```
-
-# Filter by expression
-```bash
-pytest -k "fetcher"
-```
-
-# Stop on first failure
-```bash
-pytest -x
-```
-
-### 2.3 Code coverage (optional)
-This subsection notes optional coverage.
-
-If you choose to add coverage (e.g., using pytest-cov), you can run:
-
-# Run coverage
-```bash
-pytest --cov=rate_monitor --cov-report=term-missing
-```
-
-This is not required by the template, but it is a common extension in production systems.
 
 ---
 
-## 3. Test organization
-This section explains test layout.
+## Notes on the `src/` Layout and Imports
 
-The tests/ directory mirrors the main code modules:
+This repository uses a `src/` layout. Tests work without installing the package because:
 
-```text
-tests/
-├─ conftest.py
-├─ test_config.py
-├─ test_db.py
-├─ test_fetcher.py
-├─ test_parser.py
-├─ test_analyzer.py
-├─ test_exporter.py
-├─ test_notifier.py
-└─ test_cli.py        # optional / lightweight
-```
+* `tests/conftest.py` adds `src/` to `sys.path`, enabling `import rate_monitor` during test execution.
 
-### 3.1 conftest.py
-This subsection explains fixtures.
+This behavior is **test-only**. For runtime usage outside `pytest`, prefer either:
 
-Used to define reusable fixtures:
-
-Example fixtures:
-
-A temporary YAML configuration (written into tmp_path).
-
-Temporary SQLite database paths.
-
-Dummy TargetConfig and Settings objects.
-
-Mock RateStats instances.
-
-By centralizing fixtures in conftest.py, tests remain concise and focused.
+* setting `PYTHONPATH=src` when running the CLI, or
+* configuring packaging so `pip install -e .` installs the `rate_monitor` package from `src/`.
 
 ---
 
-## 4. Module-specific tests
-This section lists module-specific expectations.
+## What the Tests Prove
 
-### 4.1 Config (test_config.py)
-Goal: Ensure that configuration is loaded and validated correctly.
+### Fetching (HTTP)
 
-Typical tests:
+Validated behavior includes:
 
-test_load_settings_valid_yaml
+* retries on transient failures (network exceptions) and server errors (HTTP 5xx)
+* non-retry behavior on non-transient errors (e.g., HTTP 4xx)
+* failure surfacing via the module’s exception type
 
-Write a minimal valid YAML to tmp_path / "settings.yml" and load it.
+### Parsing (HTML → float)
 
-Assert fields (DB path, monitoring windows, alert threshold, Slack settings).
+Validated behavior includes:
 
-test_load_targets_valid_yaml
+* selector-based extraction using a CSS selector
+* numeric normalization for common formats (thousands separators, decimal separators, currency symbols)
+* failures when no element matches the selector or conversion to float fails
 
-Write a YAML file with multiple targets.
+### Storage (SQLite)
 
-Assert that:
+Validated behavior includes:
 
-load_targets() returns the correct number of TargetConfig objects.
+* schema creation and idempotent initialization
+* inserting time-series observations
+* retrieving history filtered by a *day-based* cutoff window
 
-id, name, url, selector are parsed correctly.
+### Analysis and alerting logic
 
-test_load_settings_missing_required_field_raises
+Validated behavior includes:
 
-Omit a required field (e.g. db.path).
+* moving averages computed over the last N observations
+* percent delta calculations and safe handling when averages are unavailable or base is zero
+* alert decision logic based on a threshold percentage
+* behavior with insufficient history (no alert)
 
-Assert that ConfigError is raised with a helpful message.
+### Notifiers
 
-Key points:
+Validated behavior includes:
 
-Use temporary files (tmp_path) instead of real config files.
+* stdout notifier does not emit output when `should_alert` is false
+* Slack notifier sends a webhook request only when `should_alert` is true
+* Slack request failures are reported as module-level errors
 
-Keep tests independent from actual config/*.example.yml.
+### Exporters
 
-### 4.2 Database (test_db.py)
-Goal: Verify that RateDatabase handles schema creation and basic time-series operations.
+Validated behavior includes:
 
-Typical tests:
+* CSV output includes expected headers and rows
+* JSON output includes expected fields derived from the stats dataclass
+* output directories are created automatically
 
-test_init_schema_creates_table
+### CLI orchestration (dry-run)
 
-Use an in-memory DB (:memory:) or tmp_path / "test.sqlite3".
+Validated behavior includes:
 
-Call init_schema().
-
-Query SQLite metadata to assert that the rates table exists.
-
-test_insert_and_get_history_round_trip
-
-Insert a few records with different timestamps for a given target_id.
-
-Call get_history(target_id, days=N).
-
-Assert that the returned data matches what was inserted (filtering by date).
-
-test_get_history_filters_by_days
-
-Insert older and newer records.
-
-Call get_history(..., days=7) and confirm that older records are excluded.
-
-Key points:
-
-Tests should be isolated—no reliance on real data/rates.sqlite3.
-
-Consider using tmp_path for DB files and deleting them after tests.
-
-### 4.3 Fetcher (test_fetcher.py)
-Goal: Confirm behavior around HTTP requests, retries, and errors.
-
-Typical tests (using monkeypatch or unittest.mock):
-
-test_fetcher_successful_request
-
-Mock requests.get to return a 200 response with test HTML.
-
-Assert that Fetcher.get() returns the expected text.
-
-test_fetcher_retries_on_5xx
-
-Mock requests.get to raise or return 500 on first calls, then 200.
-
-Assert:
-
-It retries up to max_retries.
-
-It eventually returns the 200 body.
-
-test_fetcher_does_not_retry_on_4xx
-
-Mock requests.get to return a 404.
-
-Assert that it does not retry and raises FetchError.
-
-test_fetcher_sets_timeout_and_headers
-
-Verify that requests.get is called with the configured timeout and headers.
-
-Key points:
-
-No real network calls occur in tests.
-
-Use mocking to simulate different HTTP conditions.
-
-### 4.4 Parser (test_parser.py)
-Goal: Validate that HTML is parsed correctly into numeric values.
-
-Typical tests:
-
-test_parse_simple_number
-
-HTML: <span class="rate">123.45</span>
-
-Expect 123.45 as a float.
-
-test_parse_number_with_comma
-
-HTML: <span class="rate">123,45</span>
-
-Expect 123.45 (comma replaced with dot).
-
-test_parse_currency_symbol
-
-HTML: <span class="rate">\123.45</span>
-
-Expect 123.45 (currency symbol stripped).
-
-test_parse_missing_element_raises_error
-
-HTML without the target selector.
-
-Expect ParseError with a descriptive message.
-
-Key points:
-
-Do not fetch real pages.
-
-Embed small HTML snippets directly in the tests.
-
-### 4.5 Analyzer (test_analyzer.py)
-Goal: Ensure that moving averages, percentage changes, and alert decisions are correct.
-
-Typical tests:
-
-test_analyzer_no_values_returns_no_alert
-
-Input: empty history list.
-
-Expect current=None, all averages None, should_alert=False.
-
-test_analyzer_small_change_no_alert
-
-Input: values where the change vs. short/long averages is below threshold.
-
-Expect should_alert=False.
-
-test_analyzer_large_change_triggers_alert
-
-Input: values with obvious spike.
-
-Expect should_alert=True and a reason explaining which threshold was crossed.
-
-test_analyzer_handles_short_history
-
-Input: fewer points than window_long.
-
-Confirm that long average is computed only from available data, or remains None depending on implementation.
-
-Key points:
-
-Tests should be numeric and deterministic.
-
-Clearly document threshold behavior in tests (e.g. “strictly greater than threshold triggers alert”).
-
-### 4.6 Exporter (test_exporter.py)
-Goal: Confirm that CSV and JSON outputs are structured correctly.
-
-Typical tests (using tmp_path):
-
-test_export_history_to_csv
-
-Provide a small set of rows (timestamp_iso, target_id, value).
-
-Write to a temp file.
-
-Read it back and assert:
-
-The header row (timestamp,target_id,value).
-
-Row count and cell values.
-
-test_export_stats_to_json
-
-Create several RateStats instances with test data.
-
-Export to JSON.
-
-Load the file and assert keys/values for each stats object.
-
-Key points:
-
-Focus on schema correctness, not formatting aesthetics.
-
-Be explicit about types (string vs number).
-
-### 4.7 Notifier (test_notifier.py)
-Goal: Verify that notifications are sent in the right conditions and format.
-
-Typical tests:
-
-test_stdout_notifier_prints_on_alert
-
-Create a RateStats with should_alert=True.
-
-Use io.StringIO as the stream for StdoutNotifier.
-
-Assert that output contains target ID and relevant values.
-
-test_stdout_notifier_silent_when_no_alert
-
-should_alert=False.
-
-Assert that nothing is written.
-
-test_slack_notifier_calls_webhook_when_alert
-
-Mock requests.post.
-
-should_alert=True.
-
-Assert:
-
-requests.post called once with the configured webhook URL.
-
-Payload contains key stats.
-
-test_slack_notifier_skips_when_no_alert
-
-should_alert=False.
-
-Assert requests.post is not called.
-
-test_slack_notifier_raises_on_http_error
-
-Mock requests.post to return a non-2xx response.
-
-Expect NotificationError.
-
-Key points:
-
-No real Slack calls.
-
-Tests express clearly when we send notifications and what happens on error.
-
-### 4.8 CLI (test_cli.py)
-Goal: Light, high-level checks of CLI behavior, without exercising full I/O.
-
-Because CLI orchestration connects all layers, we keep tests:
-
-Small.
-
-Based on mocking internal components.
-
-Typical tests:
-
-test_cli_parses_arguments
-
-Use monkeypatch to override sys.argv.
-
-Invoke main() and assert that it reads the custom paths.
-
-test_cli_dry_run_does_not_insert_into_db
-
-Mock RateDatabase.insert_rate.
-
-Run CLI with --dry-run.
-
-Assert that insert_rate is not called.
-
-test_cli_uses_slack_notifier_when_enabled
-
-Mock SlackNotifier and StdoutNotifier.
-
-Use settings that enable Slack.
-
-Assert that CLI chooses Slack.
-
-Key points:
-
-Avoid real HTTP, DB, or file I/O.
-
-Use mocks to assert the wiring is correct.
+* no DB insert calls during `--dry-run`
+* exports are invoked
+* notifier is invoked for each processed target
 
 ---
 
-## 5. Continuous integration (CI)
-This section notes CI expectations.
+## CI Validation
 
-### 5.1 GitHub Actions workflow
-The repository includes a skeleton workflow under:
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 
-```text
-.github/workflows/ci.yml
-```
+* dependency installation via `requirements.txt`
+* `pytest` with `PYTHONWARNINGS=error::DeprecationWarning`
 
-A typical configuration (simplified) might:
+### What CI guarantees
 
-Run on:
+* The unit-level behavior of the pipeline is continuously regression-tested.
+* Changes to parsing, retry logic, DB behavior, alert logic, exporters, and notifier behavior are caught quickly.
 
-push to main
+### What CI does not guarantee
 
-pull_request to main
-
-Steps:
-
-Check out the repository.
-
-Set up Python (3.11).
-
-Install dependencies.
-
-Run ruff (linting).
-
-Run pytest (tests).
-
-This ensures that:
-
-New changes pass tests before being merged.
-
-Linting keeps style and potential issues under control.
-
-### 5.2 Local vs CI
-Locally:
-
-You can run pytest + ruff manually.
-
-In CI:
-
-The workflow ensures the same commands are run on every push.
-
-This demonstrates to clients that you follow a modern CI workflow.
+* Live scraping reliability against any specific website.
+* Scheduler correctness (cron/Task Scheduler execution and environment behavior).
+* End-to-end correctness for a specific deployment environment (proxy, network policy, SSL interception, etc.).
 
 ---
 
-## 6. Extending the test suite
-This section suggests extensions.
+## Test Data, Fixtures, and Temporary Artifacts
 
-When adapting this template to real projects, you can extend tests in the following ways:
+### Inline fixtures
 
-Integration tests
+Many tests use inline YAML strings and HTML fragments to keep tests:
 
-Spin up a temporary environment using real configs.
+* readable,
+* self-contained,
+* portable.
 
-Use a stable test site or a local mock server.
+### Temporary filesystem artifacts
 
-Property-based tests
+Tests use `tmp_path` for:
 
-For numeric calculations in analyzer.py, use tools like hypothesis to explore edge cases.
-
-Performance tests
-
-Benchmark get_history and analysis functions with larger datasets.
-
-End-to-end smoke tests
-
-Execute CLI in a temporary directory with fake targets, verifying that it:
-
-Creates a DB,
-
-Writes CSV/JSON,
-
-Exits successfully.
-
-The current suite is intentionally focused on unit tests, as that is the most portable and template-friendly approach.
+* SQLite DB files (avoids persistent state)
+* exported CSV/JSON files
+* temporary settings files to validate config loading behavior
 
 ---
 
-## 7. Summary
-This section summarizes the testing approach.
+## Extending the Test Suite
 
-The Rate Monitor Template includes a structured, pytest-based test suite.
+### When to add tests
 
-Each module has its own dedicated test file with isolated tests.
+Add or update tests when you:
 
-The suite is designed to run quickly, locally and in CI.
+* change numeric parsing rules (new formats, new currencies, embedded text)
+* modify fetch retry rules (e.g., add 429/backoff support)
+* change how settings affect runtime behavior (e.g., configurable windows or alert enable flags)
+* add a new notifier backend (email, Teams, Discord, etc.)
+* expand exported data fields or output formats
 
-Tests are crafted to demonstrate:
+### Recommended patterns
 
-Correctness,
+* Keep tests deterministic and avoid live I/O.
+* Patch at the boundary:
 
-Robustness to errors,
+  * HTTP requests (`requests.get`, `requests.post`)
+  * time generation (only if behavior depends on the current time)
+* Prefer explicit, minimal assertions that match the intended contract.
 
-And professional engineering practices.
+---
 
-By following and extending this testing approach, you can confidently evolve the template into a production-ready monitoring solution for real-world client projects.
+## Troubleshooting
+
+### `ModuleNotFoundError: rate_monitor`
+
+* Run `pytest` from the repository root.
+* Confirm `tests/conftest.py` exists and `src/` is present.
+
+### SQLite issues on Windows (file locks)
+
+* If a test run is interrupted, SQLite files may remain locked briefly.
+* Ensure the previous Python process has fully exited and rerun.
+
+### Slack notifier test failures
+
+* Slack tests do not call Slack; they patch `requests.post`.
+* Failures generally indicate a changed payload format or alert gating behavior.
+
+---
+
+## Known Limitations (Intentional)
+
+* No live website integration tests.
+* No scheduler execution tests.
+* No packaging installation test (e.g., a clean environment validation of `pip install -e .` + CLI execution).
+
+These are deliberate trade-offs to keep tests fast, deterministic, and safe. They can be added as optional integration checks if the template is evolved into a deployment-ready service package.
