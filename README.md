@@ -8,6 +8,18 @@ A configuration-driven Python template that monitors numeric rates/prices from w
 
 ---
 
+## Demo Screenshots
+
+* Demo Screenshots
+
+| Config (targets + settings) | CLI run (collect 100 observations) | Artifacts (CSV + computed stats / alert decision) |
+| --- | --- | --- |
+| <img src="docs/img/readme/03_rate-monitor-config-yaml.png" width="320" alt="Example YAML config: targets (Books to Scrape) and settings (SQLite path, interval, alert threshold)" /> | <img src="docs/img/readme/01_rate-monitor-books-100-proof.png" width="320" alt="CLI run proof: exports rates.csv and latest_stats.json; verifies 100 rows; prints value min/max" /> | <img src="docs/img/readme/02_rate-monitor-books-100-artifacts-alert.png" width="320" alt="Output artifacts preview: rates.csv rows and latest_stats.json showing current/avg and should_alert flags" /> |
+
+> Demo shown uses public test pages (Books to Scrape). Replace targets with permitted sources for real monitoring.
+
+---
+
 ## What this repository provides
 This project is a practical, reusable baseline for “monitoring a small set of changing numeric values on the web” with engineering discipline:
 
